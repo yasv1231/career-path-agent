@@ -75,11 +75,14 @@ python main.py
  - Excel for Data Analysis
  - SQL for Data Analysis
  - Python with Pandas & NumPy
+
 🌐 FREE Courses to Start:
  - Google Data Analytics Certificate → Coursera
  - Excel for Data Analysis → FreeCodeCamp
  - SQL Full Course → YouTube
+
 🗺️ Personalized 8-Week Roadmap
+
 📝 Evaluation: Reason why this career matches your profile
 
 🎯 Why This Project Matters:
