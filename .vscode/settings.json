@@ -1,0 +1,6 @@
+{
+    "python-envs.pythonProjects": [],
+    "chat.tools.terminal.autoApprove": {
+        "git remote": true
+    }
+}

@@ -1,92 +1,55 @@
-# main.py
+﻿# main.py
 # Multi-Agent Career Path Recommendation System (Console Version)
-# This version uses:
-#  - CareerAgent
-#  - CourseAgent
-#  - RoadmapAgent
-#  - EvaluatorAgent
-#  - MemoryManager (simple long-term memory)
-from agents.tool_agent import ToolAgent
-from agents.career_agent import CareerAgent
-from agents.course_agent import CourseAgent
-from agents.roadmap_agent import RoadmapAgent
-from agents.evaluator_agent import EvaluatorAgent
-from memory.memory_manager import MemoryManager
+# This version uses a LangGraph workflow for multi-turn orchestration.
+from pathlib import Path
+import os
 
-def ask_user_profile():
-    print("👋 Welcome to the AI Career Path Agent!\n")
-
-    education = input("1) What is your current education/branch? (e.g., B.Tech CSE, AI&DS): ")
-    favorites = input("2) What are your favorite subjects or topics? (comma separated): ")
-    skills = input("3) What technical skills do you know? (e.g., Python, SQL, Excel): ")
-    interest = input("4) What career are you interested in? (e.g., Data Analyst, Data Scientist, ML Engineer, Not sure): ")
-    hours = input("5) How many hours per week can you spend on learning? (number): ")
-
-    profile = {
-        "education": education.strip(),
-        "favorites": [x.strip().lower() for x in favorites.split(",") if x.strip()],
-        "skills": [x.strip().lower() for x in skills.split(",") if x.strip()],
-        "interest": interest.strip().lower(),
-        "hours_per_week": hours.strip()
-    }
-    return profile
+try:
+    from dotenv import load_dotenv
+except Exception:
+    load_dotenv = None
 
 
-def main():
-    memory = MemoryManager()
-    last_profile = memory.load_last_profile()
+def _load_env_file() -> None:
+    """Best-effort .env loading for local runs.
 
-    if last_profile:
-        print("👋 Welcome back! I found your last saved profile.\n")
-        print(f"Last education: {last_profile.get('education', 'N/A')}")
-        print(f"Last interest : {last_profile.get('interest', 'N/A')}")
-        use_last = input("\nDo you want to reuse this profile? (y/n): ").strip().lower()
-        if use_last == "y":
-            profile = last_profile
-        else:
-            profile = ask_user_profile()
-    else:
-        profile = ask_user_profile()
+    Supports both standard KEY=VALUE lines and PowerShell-style
+    "$env:KEY=VALUE" lines.
+    """
+    env_path = Path(__file__).with_name(".env")
+    if not env_path.exists():
+        return
 
-    # Save latest profile to memory
-    memory.save_profile(profile)
+    # First, try standard dotenv parsing if available.
+    if load_dotenv:
+        load_dotenv(env_path, override=False)
 
-    # Initialize agents
-    career_agent = CareerAgent()
-    course_agent = CourseAgent()
-    roadmap_agent = RoadmapAgent()
-    evaluator_agent = EvaluatorAgent()
-    tool_agent = ToolAgent()
+    # Then, handle PowerShell-style lines explicitly.
+    for raw in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
 
-    print("\n🔍 Analyzing your profile with multiple agents...\n")
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
 
-    # Multi-agent flow
-    career = career_agent.infer_career(profile)
-    courses = course_agent.get_courses(career)
-    roadmap = roadmap_agent.build_roadmap(career, profile["hours_per_week"])
-    evaluation = evaluator_agent.evaluate(profile, career)
+        if key.lower().startswith("$env:"):
+            key = key[5:]
 
-    # Output
-    print(f"🎯 Recommended Career Path for you: {career}\n")
-
-    print("📚 Suggested Courses / Topics to Learn:")
-    for c in courses:
-        print(f"  - {c}")
-    print("\n🌐 FREE Courses you can start:")
-    free_courses = tool_agent.get_free_courses(career)
-    for name, url in free_courses:
-       print(f"  - {name} → {url}")
+        if key and value and key not in os.environ:
+            os.environ[key] = value
 
 
-    print(roadmap)
+_load_env_file()
 
-    print("📝 Evaluation & Guidance:")
-    print(evaluation)
+from langgraph_workflow import run_conversation
 
-    print("\n✅ Next Step: Start with the suggested courses and follow the roadmap step by step.")
-    print("   You can run this agent again later — it will remember your profile and adjust.\n")
-    print("(This is the Multi-Agent + Memory console version. In the capstone writeup,")
-    print(" we will describe how to extend this with tools and deployment according to Google’s instructions.)")
+
+def main() -> None:
+    run_conversation()
 
 
 if __name__ == "__main__":
