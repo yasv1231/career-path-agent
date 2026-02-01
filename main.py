@@ -1,6 +1,6 @@
-﻿# main.py
+# main.py
 # Multi-Agent Career Path Recommendation System (Console Version)
-# This version uses a LangGraph workflow for multi-turn orchestration.
+# Message flow runner (chat -> extract -> memory).
 from pathlib import Path
 import os
 
@@ -11,20 +11,13 @@ except Exception:
 
 
 def _load_env_file() -> None:
-    """Best-effort .env loading for local runs.
-
-    Supports both standard KEY=VALUE lines and PowerShell-style
-    "$env:KEY=VALUE" lines.
-    """
     env_path = Path(__file__).with_name(".env")
     if not env_path.exists():
         return
 
-    # First, try standard dotenv parsing if available.
     if load_dotenv:
         load_dotenv(env_path, override=False)
 
-    # Then, handle PowerShell-style lines explicitly.
     for raw in env_path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -45,11 +38,11 @@ def _load_env_file() -> None:
 
 _load_env_file()
 
-from langgraph_workflow import run_conversation
+from workflow.runner import run_message_flow
 
 
 def main() -> None:
-    run_conversation()
+    run_message_flow(enable_memory=True)
 
 
 if __name__ == "__main__":

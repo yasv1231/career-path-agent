@@ -1,0 +1,257 @@
+﻿[
+  {
+    "id": "job_profile_data_analyst",
+    "type": "job_profile",
+    "career": "data analyst",
+    "title": "Data Analyst role summary",
+    "chunks": [
+      {
+        "text": "Data Analysts turn raw data into reports and dashboards. They define metrics, clean datasets, and run SQL queries."
+      },
+      {
+        "text": "They communicate insights to stakeholders and commonly use SQL, Excel, Python, and BI tools like Power BI or Tableau."
+      }
+    ]
+  },
+  {
+    "id": "competency_data_analyst",
+    "type": "competency",
+    "career": "data analyst",
+    "title": "Data Analyst competency model",
+    "chunks": [
+      {
+        "text": "Core competencies: SQL querying, spreadsheet analysis, basic statistics, data visualization, and business storytelling."
+      },
+      {
+        "text": "Behavioral competencies: curiosity, attention to detail, and clear communication with non-technical teams."
+      }
+    ]
+  },
+  {
+    "id": "resource_data_analyst_course_1",
+    "type": "resource",
+    "career": "data analyst",
+    "resource_type": "course",
+    "title": "Google Data Analytics Certificate (Coursera audit)",
+    "url": "https://www.coursera.org/professional-certificates/google-data-analytics",
+    "chunks": [
+      {
+        "text": "End-to-end analytics foundations, including spreadsheets, SQL, and dashboards."
+      }
+    ]
+  },
+  {
+    "id": "resource_data_analyst_course_2",
+    "type": "resource",
+    "career": "data analyst",
+    "resource_type": "course",
+    "title": "Excel for Data Analysis (freeCodeCamp)",
+    "url": "https://www.freecodecamp.org/learn/data-analysis-with-excel/",
+    "chunks": [
+      {
+        "text": "Hands-on Excel analysis skills and reporting workflows."
+      }
+    ]
+  },
+  {
+    "id": "resource_data_analyst_project_1",
+    "type": "resource",
+    "career": "data analyst",
+    "resource_type": "project",
+    "title": "Retail sales dashboard project",
+    "url": "https://www.kaggle.com/datasets",
+    "chunks": [
+      {
+        "text": "Build a KPI dashboard from a retail sales dataset and present monthly insights."
+      }
+    ]
+  },
+  {
+    "id": "job_profile_data_scientist",
+    "type": "job_profile",
+    "career": "data scientist",
+    "title": "Data Scientist role summary",
+    "chunks": [
+      {
+        "text": "Data Scientists build predictive models and run experiments to solve business problems."
+      },
+      {
+        "text": "They handle data wrangling, feature engineering, model training, and evaluation using Python, SQL, statistics, and ML libraries."
+      }
+    ]
+  },
+  {
+    "id": "competency_data_scientist",
+    "type": "competency",
+    "career": "data scientist",
+    "title": "Data Scientist competency model",
+    "chunks": [
+      {
+        "text": "Core competencies: statistics, machine learning, Python, data wrangling, and experiment design."
+      },
+      {
+        "text": "Behavioral competencies: hypothesis-driven thinking, strong storytelling, and collaboration with product and engineering."
+      }
+    ]
+  },
+  {
+    "id": "resource_data_scientist_course_1",
+    "type": "resource",
+    "career": "data scientist",
+    "resource_type": "course",
+    "title": "Machine Learning by Andrew Ng (Coursera audit)",
+    "url": "https://www.coursera.org/learn/machine-learning",
+    "chunks": [
+      {
+        "text": "ML foundations covering supervised and unsupervised algorithms."
+      }
+    ]
+  },
+  {
+    "id": "resource_data_scientist_course_2",
+    "type": "resource",
+    "career": "data scientist",
+    "resource_type": "course",
+    "title": "Kaggle Learn: Python",
+    "url": "https://www.kaggle.com/learn/python",
+    "chunks": [
+      {
+        "text": "Fast practical Python for data work."
+      }
+    ]
+  },
+  {
+    "id": "resource_data_scientist_project_1",
+    "type": "resource",
+    "career": "data scientist",
+    "resource_type": "project",
+    "title": "Customer churn prediction",
+    "url": "https://www.kaggle.com/datasets",
+    "chunks": [
+      {
+        "text": "Train a classification model and present model metrics with business impact."
+      }
+    ]
+  },
+  {
+    "id": "job_profile_ml_engineer",
+    "type": "job_profile",
+    "career": "ml engineer",
+    "title": "ML Engineer role summary",
+    "chunks": [
+      {
+        "text": "ML Engineers productionize models and build reliable ML systems."
+      },
+      {
+        "text": "They design data pipelines, serve models, monitor drift, and collaborate with software teams using Python, ML frameworks, Docker, and cloud services."
+      }
+    ]
+  },
+  {
+    "id": "competency_ml_engineer",
+    "type": "competency",
+    "career": "ml engineer",
+    "title": "ML Engineer competency model",
+    "chunks": [
+      {
+        "text": "Core competencies: machine learning, software engineering, model deployment, CI/CD, and monitoring."
+      },
+      {
+        "text": "Behavioral competencies: reliability mindset, system thinking, and cross-team collaboration."
+      }
+    ]
+  },
+  {
+    "id": "resource_ml_engineer_course_1",
+    "type": "resource",
+    "career": "ml engineer",
+    "resource_type": "course",
+    "title": "Intro to Machine Learning (Kaggle)",
+    "url": "https://www.kaggle.com/learn/intro-to-machine-learning",
+    "chunks": [
+      {
+        "text": "Hands-on ML basics with practical exercises."
+      }
+    ]
+  },
+  {
+    "id": "resource_ml_engineer_course_2",
+    "type": "resource",
+    "career": "ml engineer",
+    "resource_type": "course",
+    "title": "Full Stack Deep Learning",
+    "url": "https://fullstackdeeplearning.com/",
+    "chunks": [
+      {
+        "text": "Production ML systems, deployment, and monitoring practices."
+      }
+    ]
+  },
+  {
+    "id": "resource_ml_engineer_project_1",
+    "type": "resource",
+    "career": "ml engineer",
+    "resource_type": "project",
+    "title": "Model deployment pipeline",
+    "url": "",
+    "chunks": [
+      {
+        "text": "Deploy a trained model behind a REST API with monitoring dashboards."
+      }
+    ]
+  },
+  {
+    "id": "job_profile_software_engineer",
+    "type": "job_profile",
+    "career": "software engineer",
+    "title": "Software Engineer role summary",
+    "chunks": [
+      {
+        "text": "Software Engineers design, build, and maintain applications and services."
+      },
+      {
+        "text": "They write clean code, test features, review pull requests, and collaborate across teams using Git and common languages like Python, JavaScript, or Java."
+      }
+    ]
+  },
+  {
+    "id": "competency_software_engineer",
+    "type": "competency",
+    "career": "software engineer",
+    "title": "Software Engineer competency model",
+    "chunks": [
+      {
+        "text": "Core competencies: programming fundamentals, data structures, debugging, and system design basics."
+      },
+      {
+        "text": "Behavioral competencies: collaboration, ownership, and continuous learning."
+      }
+    ]
+  },
+  {
+    "id": "resource_software_engineer_course_1",
+    "type": "resource",
+    "career": "software engineer",
+    "resource_type": "course",
+    "title": "CS50 Introduction to Computer Science",
+    "url": "https://cs50.harvard.edu/x/",
+    "chunks": [
+      {
+        "text": "Foundational programming and problem solving."
+      }
+    ]
+  },
+  {
+    "id": "resource_software_engineer_project_1",
+    "type": "resource",
+    "career": "software engineer",
+    "resource_type": "project",
+    "title": "Build a REST API service",
+    "url": "",
+    "chunks": [
+      {
+        "text": "Create a CRUD API with authentication and unit tests."
+      }
+    ]
+  }
+]

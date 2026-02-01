@@ -1,8 +1,8 @@
 """
-Lightweight fallback implementation for StateGraph used by
-`langgraph_workflow.py`. This implements the minimal API the
-workflow expects: node registration, edges, a simple conditional
-edge, compile (no-op) and invoke to run the graph.
+Lightweight fallback implementation for StateGraph used by the
+workflow modules (e.g., workflow/graph_chat.py, workflow/graph_career.py).
+This implements the minimal API the workflow expects: node registration,
+edges, a simple conditional edge, compile (no-op) and invoke to run the graph.
 """
 
 END = "END"

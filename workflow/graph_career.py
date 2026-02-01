@@ -1,19 +1,19 @@
-﻿from typing import Dict, List, Tuple, TypedDict, Any
+from __future__ import annotations
+
+from typing import Dict, List, Tuple, TypedDict, Any
 import sys
 import os
 import json
 
-try:
-    from langgraph.graph import StateGraph, END
-except Exception:
-    # Fallback to a local lightweight implementation when the
-    # external `langgraph` package is not available.
-    from _local_langgraph import StateGraph, END
-
 from langsmith_integration import get_default_logger, configure_langsmith, get_chat_model
-
-# initialize a module-level logger (will gracefully no-op if LangSmith not available)
-logger = get_default_logger()
+from tool_agent import ToolAgent
+from career_agent import CareerAgent
+from course_agent import CourseAgent
+from roadmap_agent import RoadmapAgent
+from evaluator_agent import EvaluatorAgent
+from memory_manager import MemoryManager
+from rag_agent import RagAgent
+from .state import ConversationState, REQUIRED_FIELDS
 
 try:
     from langchain_core.messages import SystemMessage, HumanMessage
@@ -23,31 +23,7 @@ except Exception:
     HumanMessage = None
     HAS_LANGCHAIN_MESSAGES = False
 
-from tool_agent import ToolAgent
-from career_agent import CareerAgent
-from course_agent import CourseAgent
-from roadmap_agent import RoadmapAgent
-from evaluator_agent import EvaluatorAgent
-from memory_manager import MemoryManager
-
-
-class ConversationState(TypedDict, total=False):
-    profile: Dict[str, Any]
-    has_last_profile: bool
-    reuse_last_profile: bool
-    fields_to_update: List[str]
-    career: str
-    career_source: str
-    career_reasoning: str
-    courses: List[str]
-    roadmap: str
-    evaluation: str
-    free_courses: List[Tuple[str, str]]
-    action: str
-    llm_enabled: bool
-
-
-REQUIRED_FIELDS = ["education", "favorites", "skills", "interest", "hours_per_week"]
+logger = get_default_logger()
 
 
 def _parse_list(value: str) -> List[str]:
@@ -66,7 +42,6 @@ def _safe_print(*args: object, sep: str = " ", end: str = "\n") -> None:
 
 
 def _extract_career_from_text(text: str) -> tuple[str, str]:
-    """Best-effort extraction of a career label and reasoning from LLM output."""
     if not text:
         return "", ""
 
@@ -74,7 +49,6 @@ def _extract_career_from_text(text: str) -> tuple[str, str]:
     if not lines:
         return "", text
 
-    # Try to parse a JSON response first.
     try:
         data = json.loads(text)
         if isinstance(data, dict):
@@ -85,7 +59,6 @@ def _extract_career_from_text(text: str) -> tuple[str, str]:
     except Exception:
         pass
 
-    # Fallback: look for a "Career:" prefix.
     for ln in lines:
         lower = ln.lower()
         if lower.startswith("career:"):
@@ -93,14 +66,12 @@ def _extract_career_from_text(text: str) -> tuple[str, str]:
             reasoning = text
             return career, reasoning
 
-    # Last resort: use the first non-empty line as the career.
-    career = lines[0].lstrip("-• ").strip()
+    career = lines[0].lstrip("-? ").strip()
     reasoning = text
     return career, reasoning
 
 
-def build_graph() -> StateGraph:
-    # Configure LangSmith tracing (best-effort) and initialize the LLM.
+def build_graph():
     langsmith_status = configure_langsmith("career-path-agent")
     llm = get_chat_model()
 
@@ -110,6 +81,7 @@ def build_graph() -> StateGraph:
     roadmap_agent = RoadmapAgent()
     evaluator_agent = EvaluatorAgent()
     tool_agent = ToolAgent()
+    rag_agent = RagAgent()
 
     def load_memory(state: ConversationState) -> ConversationState:
         last_profile = memory.load_last_profile()
@@ -193,7 +165,6 @@ def build_graph() -> StateGraph:
                     HumanMessage(content=human_prompt),
                 ])
             else:
-                # Some chat models accept raw strings; keep this as a best-effort fallback.
                 response = llm.invoke(system_prompt + "\n\n" + human_prompt)
         except Exception as e:
             try:
@@ -215,7 +186,6 @@ def build_graph() -> StateGraph:
         }
 
     def run_career_agent(state: ConversationState) -> ConversationState:
-        # If the LLM already produced a career, respect it and skip rule-based logic.
         if state.get("career") and state.get("career_source") == "llm":
             return {}
 
@@ -226,6 +196,18 @@ def build_graph() -> StateGraph:
     def run_course_agent(state: ConversationState) -> ConversationState:
         career = state.get("career", "")
         return {"courses": course_agent.get_courses(career)}
+
+    def run_rag_job_confirmation(state: ConversationState) -> ConversationState:
+        career = state.get("career", "")
+        return {"job_confirmation": rag_agent.job_confirmation(career)}
+
+    def run_rag_competency_model(state: ConversationState) -> ConversationState:
+        career = state.get("career", "")
+        return {"competency_model": rag_agent.competency_model(career)}
+
+    def run_rag_resource_retrieval(state: ConversationState) -> ConversationState:
+        career = state.get("career", "")
+        return {"rag_resources": rag_agent.resource_retrieval(career)}
 
     def run_tool_agent(state: ConversationState) -> ConversationState:
         career = state.get("career", "")
@@ -247,6 +229,9 @@ def build_graph() -> StateGraph:
         roadmap = state.get("roadmap", "")
         evaluation = state.get("evaluation", "")
         free_courses = state.get("free_courses", [])
+        job_confirmation = state.get("job_confirmation", {})
+        competency_model = state.get("competency_model", {})
+        rag_resources = state.get("rag_resources", {})
         career_source = state.get("career_source", "unknown")
         career_reasoning = state.get("career_reasoning", "")
 
@@ -256,6 +241,97 @@ def build_graph() -> StateGraph:
         if career_reasoning:
             _safe_print("Reasoning (from LLM):")
             _safe_print(career_reasoning)
+
+        if job_confirmation:
+            _safe_print("\nJob Confirmation (RAG):")
+            items = job_confirmation.get("items", [])
+            confidence = job_confirmation.get("confidence")
+            if confidence:
+                _safe_print(f"Confidence: {confidence}")
+            status = job_confirmation.get("status")
+            if status:
+                _safe_print(f"Status: {status}")
+            action = job_confirmation.get("action")
+            if action:
+                _safe_print(f"Action: {action}")
+            refusal = job_confirmation.get("refusal")
+            if refusal:
+                _safe_print(f"Refusal: {refusal}")
+            clarify = job_confirmation.get("clarify")
+            if clarify:
+                _safe_print(f"Clarify: {clarify}")
+            if items:
+                for item in items:
+                    _safe_print(f"  - {item.get('title', '')}: {item.get('text', '')}")
+            evidence = job_confirmation.get("citations", [])
+            if evidence:
+                _safe_print("Citations:")
+                for item in evidence:
+                    _safe_print(f"  - {item.get('ref', '')} (score={item.get('score', '')})")
+
+        if competency_model:
+            _safe_print("\nCompetency Model (RAG):")
+            items = competency_model.get("items", [])
+            confidence = competency_model.get("confidence")
+            if confidence:
+                _safe_print(f"Confidence: {confidence}")
+            status = competency_model.get("status")
+            if status:
+                _safe_print(f"Status: {status}")
+            action = competency_model.get("action")
+            if action:
+                _safe_print(f"Action: {action}")
+            refusal = competency_model.get("refusal")
+            if refusal:
+                _safe_print(f"Refusal: {refusal}")
+            clarify = competency_model.get("clarify")
+            if clarify:
+                _safe_print(f"Clarify: {clarify}")
+            if items:
+                for item in items:
+                    _safe_print(f"  - {item.get('title', '')}: {item.get('text', '')}")
+            evidence = competency_model.get("citations", [])
+            if evidence:
+                _safe_print("Citations:")
+                for item in evidence:
+                    _safe_print(f"  - {item.get('ref', '')} (score={item.get('score', '')})")
+
+        if rag_resources:
+            _safe_print("\nCourse / Project Resources (RAG):")
+            items = rag_resources.get("items", [])
+            confidence = rag_resources.get("confidence")
+            if confidence:
+                _safe_print(f"Confidence: {confidence}")
+            status = rag_resources.get("status")
+            if status:
+                _safe_print(f"Status: {status}")
+            action = rag_resources.get("action")
+            if action:
+                _safe_print(f"Action: {action}")
+            refusal = rag_resources.get("refusal")
+            if refusal:
+                _safe_print(f"Refusal: {refusal}")
+            clarify = rag_resources.get("clarify")
+            if clarify:
+                _safe_print(f"Clarify: {clarify}")
+            for item in items:
+                title = item.get("title", "Resource")
+                resource_type = item.get("resource_type", "resource")
+                notes = item.get("notes", "")
+                url = item.get("url", "")
+                confidence = item.get("confidence", "")
+                citations = item.get("citations", [])
+                line = f"  - [{resource_type}] {title}"
+                if notes:
+                    line = f"{line} - {notes}"
+                if confidence:
+                    line = f"{line} (confidence={confidence})"
+                if url:
+                    line = f"{line} -> {url}"
+                _safe_print(line)
+                if citations:
+                    for citation in citations:
+                        _safe_print(f"      citation: {citation.get('ref', '')} (score={citation.get('score', '')})")
 
         _safe_print("Suggested Courses / Topics to Learn:")
         for course in courses:
@@ -313,15 +389,6 @@ def build_graph() -> StateGraph:
             _safe_print(f"  - {key}: {profile.get(key, 'N/A')}")
         return {}
 
-    # Start a LangSmith run for this graph execution (best-effort)
-    try:
-        logger.start_run("conversation_run")
-        logger.log_event("langsmith_config", langsmith_status)
-        logger.log_event("llm_config", {"enabled": bool(llm), "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini")})
-    except Exception:
-        pass
-
-    # Helper to wrap node functions with event logging
     def wrap_node(name: str, fn):
         def _wrapped(state: ConversationState) -> ConversationState:
             try:
@@ -347,15 +414,10 @@ def build_graph() -> StateGraph:
 
         return _wrapped
 
-    def should_continue(state: ConversationState) -> str:
-        action = state.get("action")
-        if action == "update":
-            return "collect_profile"
-        if action == "rerun":
-            return "llm_career_agent"
-        if action == "show_profile":
-            return "show_profile"
-        return END
+    try:
+        from langgraph.graph import StateGraph, END
+    except Exception:
+        from _local_langgraph import StateGraph, END
 
     graph = StateGraph(ConversationState)
     graph.add_node("load_memory", wrap_node("load_memory", load_memory))
@@ -364,6 +426,9 @@ def build_graph() -> StateGraph:
     graph.add_node("save_memory", wrap_node("save_memory", save_memory))
     graph.add_node("llm_career_agent", wrap_node("llm_career_agent", run_llm_career_agent))
     graph.add_node("career_agent", wrap_node("career_agent", run_career_agent))
+    graph.add_node("rag_job_confirmation", wrap_node("rag_job_confirmation", run_rag_job_confirmation))
+    graph.add_node("rag_competency_model", wrap_node("rag_competency_model", run_rag_competency_model))
+    graph.add_node("rag_resource_retrieval", wrap_node("rag_resource_retrieval", run_rag_resource_retrieval))
     graph.add_node("course_agent", wrap_node("course_agent", run_course_agent))
     graph.add_node("tool_agent", wrap_node("tool_agent", run_tool_agent))
     graph.add_node("roadmap_agent", wrap_node("roadmap_agent", run_roadmap_agent))
@@ -378,25 +443,34 @@ def build_graph() -> StateGraph:
     graph.add_edge("collect_profile", "save_memory")
     graph.add_edge("save_memory", "llm_career_agent")
     graph.add_edge("llm_career_agent", "career_agent")
-    graph.add_edge("career_agent", "course_agent")
+    graph.add_edge("career_agent", "rag_job_confirmation")
+    graph.add_edge("rag_job_confirmation", "rag_competency_model")
+    graph.add_edge("rag_competency_model", "rag_resource_retrieval")
+    graph.add_edge("rag_resource_retrieval", "course_agent")
     graph.add_edge("course_agent", "tool_agent")
     graph.add_edge("tool_agent", "roadmap_agent")
     graph.add_edge("roadmap_agent", "evaluator_agent")
     graph.add_edge("evaluator_agent", "render_output")
     graph.add_edge("render_output", "follow_up")
+
+    def should_continue(state: ConversationState) -> str:
+        action = state.get("action")
+        if action == "update":
+            return "collect_profile"
+        if action == "rerun":
+            return "llm_career_agent"
+        if action == "show_profile":
+            return "show_profile"
+        return END
+
     graph.add_conditional_edges("follow_up", should_continue)
     graph.add_edge("show_profile", "follow_up")
 
-    return graph
-
-
-def run_conversation() -> None:
-    _safe_print("Welcome to the AI Career Path Agent (LangGraph workflow)!\n")
-    graph = build_graph().compile()
     try:
-        graph.invoke({})
-    finally:
-        try:
-            logger.end_run("completed")
-        except Exception:
-            pass
+        logger.start_run("conversation_run")
+        logger.log_event("langsmith_config", langsmith_status)
+        logger.log_event("llm_config", {"enabled": bool(llm), "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini")})
+    except Exception:
+        pass
+
+    return graph
