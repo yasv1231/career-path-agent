@@ -1,13 +1,11 @@
 {
   "education": "B.Tech CSE",
   "favorites": [
-    "maths",
-    "statistics"
+    "math and python"
   ],
   "skills": [
-    "python",
-    "sql"
+    "python"
   ],
-  "interest": "data analyst",
-  "hours_per_week": "8"
+  "interest": "not sure",
+  "hours_per_week": "12h"
 }
