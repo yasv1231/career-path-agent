@@ -21,7 +21,22 @@ def run_message_flow(enable_memory: bool = True) -> None:
         "goal_constraints": default_goal_constraints(),
         "asked_questions": [],
         "attempts": {},
+        "question_stage": "basic",
+        "targeted_rounds": 0,
+        "max_targeted_rounds": 2,
+        "question_phase_complete": False,
     }
+
+    # Start by asking basic questions before receiving user content.
+    state = graph.invoke(state)
+    messages_bootstrap = serialize_messages_openai(state.get("messages", []))
+    first_assistant = ""
+    for msg in reversed(messages_bootstrap):
+        if msg.get("role") == "assistant":
+            first_assistant = msg.get("content", "")
+            break
+    if first_assistant:
+        print(f"Assistant: {first_assistant}\n")
 
     while True:
         user_text = input("User: ").strip()
@@ -53,6 +68,8 @@ def run_message_flow(enable_memory: bool = True) -> None:
                 "strategy_tags": state.get("strategy_tags", []),
                 "rag_filters": state.get("rag_filters", {}),
                 "missing_fields": state.get("missing_fields", []),
+                "question_stage": state.get("question_stage", ""),
+                "question_phase_complete": bool(state.get("question_phase_complete", False)),
                 "extracted": extracted,
                 "evaluation": evaluation,
             }

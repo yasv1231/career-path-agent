@@ -43,10 +43,22 @@ QUESTION_MAP: Dict[str, str] = {
     "experience_level": "What is your current experience level (entry/junior/mid/senior)?",
     "location": "Which location or city are you targeting?",
     "timeline_weeks": "In how many weeks do you want to complete phase-1 transition?",
+    "target_role": "Which target role do you want to pursue first?",
     "industry": "Do you have a preferred industry? (optional)",
     "constraints": "Any key constraints (budget/time/language/location)?",
     "goals": "What measurable goal do you want to achieve first?",
 }
+
+BASIC_QUESTION_FIELDS: List[str] = [
+    "education",
+    "skills",
+    "interests",
+    "experience_level",
+    "location",
+    "hours_per_week",
+    "timeline_weeks",
+    "target_role",
+]
 
 
 def build_message_graph(enable_memory: bool = True):
@@ -106,6 +118,18 @@ def build_message_graph(enable_memory: bool = True):
     def _missing_fields(profile: Dict[str, Any]) -> List[str]:
         missing: List[str] = []
         for field in PROFILE_REQUIRED_FIELDS:
+            value = profile.get(field)
+            if value is None:
+                missing.append(field)
+            elif isinstance(value, list) and not value:
+                missing.append(field)
+            elif isinstance(value, str) and not value.strip():
+                missing.append(field)
+        return missing
+
+    def _missing_basic_fields(profile: Dict[str, Any]) -> List[str]:
+        missing: List[str] = []
+        for field in BASIC_QUESTION_FIELDS:
             value = profile.get(field)
             if value is None:
                 missing.append(field)
@@ -185,7 +209,7 @@ def build_message_graph(enable_memory: bool = True):
                 break
 
         if not questions:
-            return "Please provide missing key profile information to continue.", [], attempts_next
+            return "", [], attempts_next
         formatted = "\n".join(f"{idx + 1}. {question}" for idx, question in enumerate(questions))
         return "Before planning, please clarify:\n" + formatted, asked_now, attempts_next
 
@@ -253,6 +277,15 @@ def build_message_graph(enable_memory: bool = True):
             asked_now,
             attempts_next,
         )
+
+    def _has_targeted_question(
+        profile: Dict[str, Any],
+        attempts: Dict[str, int],
+        asked_questions: List[str],
+        rag_context: str,
+    ) -> bool:
+        question, _, _ = _build_deep_questions(profile, attempts, asked_questions, rag_context)
+        return bool(question.strip())
 
     def _needs_deep_dive(profile: Dict[str, Any], attempts: Dict[str, int], rag_context: str) -> bool:
         deep_fields = ("target_role", "goals", "constraints")
@@ -399,37 +432,80 @@ def build_message_graph(enable_memory: bool = True):
             "conversation_complete": evaluation.get("valid", False),
         }
 
-    def decide_next_step(profile: Dict[str, Any], attempts: Dict[str, int], rag_context: str) -> str:
-        missing = _missing_fields(profile)
-        if missing and _has_askable_missing(missing, attempts):
-            return "ask"
-        if _needs_deep_dive(profile, attempts, rag_context):
-            return "ask"
-        return "plan"
-
-    def decide_node(state: ChatConversationState) -> str:
+    def decide_next_step(state: ChatConversationState) -> str:
         profile = state.get("memory") or default_profile()
         attempts = state.get("attempts") or {}
+        asked_questions = state.get("asked_questions") or []
         rag_context = state.get("rag_context", "")
-        return decide_next_step(profile, attempts, rag_context)
+        stage = str(state.get("question_stage", "basic")).strip().lower()
+        targeted_rounds = int(state.get("targeted_rounds", 0) or 0)
+        max_targeted_rounds = int(state.get("max_targeted_rounds", 2) or 2)
+
+        if bool(state.get("question_phase_complete")):
+            return "plan"
+
+        missing_basic = _missing_basic_fields(profile)
+        if stage == "basic":
+            if missing_basic and _has_askable_missing(missing_basic, attempts):
+                return "ask"
+            if targeted_rounds < max_targeted_rounds and _has_targeted_question(
+                profile,
+                attempts,
+                asked_questions,
+                rag_context,
+            ):
+                return "ask"
+            return "question_exit"
+
+        if stage == "targeted":
+            if targeted_rounds >= max_targeted_rounds:
+                return "question_exit"
+            if _has_targeted_question(profile, attempts, asked_questions, rag_context):
+                return "ask"
+            return "question_exit"
+
+        return "question_exit"
+
+    def decide_node(state: ChatConversationState) -> str:
+        return decide_next_step(state)
 
     def ask_node(state: ChatConversationState) -> ChatConversationState:
         messages = normalize_messages(state.get("messages", []))
-        missing = state.get("missing_fields", [])
         asked_questions = state.get("asked_questions", [])
         attempts = state.get("attempts", {})
         memory = state.get("memory") or default_profile()
         rag_context = state.get("rag_context", "")
+        stage = str(state.get("question_stage", "basic")).strip().lower()
+        targeted_rounds = int(state.get("targeted_rounds", 0) or 0)
+        max_targeted_rounds = int(state.get("max_targeted_rounds", 2) or 2)
 
-        if missing and _has_askable_missing(missing, attempts):
-            question, asked_now, attempts_next = _build_basic_questions(missing, asked_questions, attempts)
-        else:
+        question = ""
+        asked_now: List[str] = []
+        attempts_next = dict(attempts)
+        next_stage = stage if stage in {"basic", "targeted"} else "basic"
+
+        if next_stage == "basic":
+            missing_basic = _missing_basic_fields(memory)
+            if missing_basic and _has_askable_missing(missing_basic, attempts_next):
+                question, asked_now, attempts_next = _build_basic_questions(
+                    missing_basic,
+                    asked_questions,
+                    attempts_next,
+                )
+                if not question:
+                    next_stage = "targeted"
+            else:
+                next_stage = "targeted"
+
+        if not question and next_stage == "targeted" and targeted_rounds < max_targeted_rounds:
             question, asked_now, attempts_next = _build_deep_questions(
                 memory,
-                attempts,
+                attempts_next,
                 asked_questions,
                 rag_context,
             )
+            if question:
+                targeted_rounds += 1
 
         if question:
             _append_assistant(messages, question)
@@ -438,7 +514,17 @@ def build_message_graph(enable_memory: bool = True):
             "next_question": question,
             "asked_questions": asked_questions + asked_now,
             "attempts": attempts_next,
+            "question_stage": next_stage,
+            "targeted_rounds": targeted_rounds,
+            "max_targeted_rounds": max_targeted_rounds,
+            "question_phase_complete": False,
             "conversation_complete": False,
+        }
+
+    def question_exit_node(state: ChatConversationState) -> ChatConversationState:
+        return {
+            "question_stage": "done",
+            "question_phase_complete": True,
         }
 
     def plan_node(state: ChatConversationState) -> ChatConversationState:
@@ -533,6 +619,7 @@ def build_message_graph(enable_memory: bool = True):
     graph.add_node("memory_update", wrap_node("memory_update", memory_update_node))
     graph.add_node("evaluate", wrap_node("evaluate", evaluation_node))
     graph.add_node("ask", wrap_node("ask", ask_node))
+    graph.add_node("question_exit", wrap_node("question_exit", question_exit_node))
     graph.add_node("plan", wrap_node("plan", plan_node))
 
     if enable_memory:
@@ -549,9 +636,11 @@ def build_message_graph(enable_memory: bool = True):
         decide_node,
         {
             "ask": "ask",
+            "question_exit": "question_exit",
             "plan": "plan",
         },
     )
+    graph.add_edge("question_exit", "plan")
 
     if enable_memory:
         graph.add_edge("ask", "memory_maintain")

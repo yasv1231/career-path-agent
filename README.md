@@ -42,6 +42,16 @@ python main.py
 python scripts/build_rag_corpus.py --docs-dir data/knowledge_docs --output data/rag_corpus.json
 ```
 
+To append new docs while keeping existing core corpus:
+
+```powershell
+python scripts/build_rag_corpus.py --docs-dir data/knowledge_docs --output data/rag_corpus.json --merge-existing
+```
+
+Notes:
+- Files containing repeated headers like `User Response Sample N` are auto-split into `profile_case` docs.
+- `profile_case` docs include an auto-generated structured summary chunk for stronger semantic retrieval.
+
 Optional semantic refinement via LLM:
 
 ```powershell

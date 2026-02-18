@@ -1,10 +1,80 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import re
 from typing import Any, Dict, List
 
 
 GOAL_CONSTRAINTS_SCHEMA_VERSION = "goal_constraints_v1"
+
+EN_NUMBER_MAP = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+    "sixty": 60,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
+}
+
+ZH_NUMBER_MAP = {
+    "零": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "俩": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+
+ZH_UNIT_MAP = {"十": 10, "百": 100, "千": 1000, "万": 10000}
+
+NUMBER_TOKEN = (
+    r"(?:\d+(?:\.\d+)?|"
+    r"one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|"
+    r"sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|"
+    r"[一二三四五六七八九十百千万两俩]+)"
+)
+TIME_UNIT_PATTERN = r"(?:years?|yrs?|yr|months?|mos?|month|weeks?|wks?|week|days?|day|年|个月|月|周|星期|天)"
+TIME_RE = re.compile(
+    rf"(?P<a>{NUMBER_TOKEN})(?:\s*(?:-|to|or|/|~|～|至|到)\s*(?P<b>{NUMBER_TOKEN}))?\s*(?P<unit>{TIME_UNIT_PATTERN})",
+    re.IGNORECASE,
+)
+WITHIN_RE_EN = re.compile(
+    rf"(?:within|in)\s+(?P<a>{NUMBER_TOKEN})(?:\s*(?:-|to|or|/|~|～)\s*(?P<b>{NUMBER_TOKEN}))?\s*(?P<unit>{TIME_UNIT_PATTERN})",
+    re.IGNORECASE,
+)
+WITHIN_RE_ZH = re.compile(
+    rf"(?P<a>{NUMBER_TOKEN})(?:\s*(?:-|到|至|~|～)\s*(?P<b>{NUMBER_TOKEN}))?\s*(?P<unit>年|个月|月|周|星期|天)\s*(?:内|之内|以内)"
+)
+MONTHLY_INCOME_RE = re.compile(
+    r"(?:rmb|cny|¥|￥)?\s*(\d[\d,]*)\s*(?:/month|per month|monthly|每月|月入|月薪)",
+    re.IGNORECASE,
+)
 
 
 def default_goal_constraints() -> Dict[str, Any]:
@@ -39,8 +109,11 @@ def _coerce_float(value: Any) -> float | None:
     if isinstance(value, (int, float)):
         return float(value)
     if isinstance(value, str):
+        cleaned = value.strip().replace(",", "")
+        if not cleaned:
+            return None
         try:
-            return float(value.strip())
+            return float(cleaned)
         except Exception:
             return None
     return None
@@ -74,8 +147,7 @@ def _normalize_goal(goal: Dict[str, Any], fallback_rank: int) -> Dict[str, Any]:
     if rank is None:
         rank = fallback_rank
     if weight is None:
-        # Rank-based default weight.
-        weight = max(0.1, 1.0 - (rank - 1) * 0.2)
+        weight = max(0.1, 1.0 - (rank - 1) * 0.15)
     return {
         "description": description,
         "metric": metric,
@@ -109,12 +181,8 @@ def coerce_goal_constraints_v1(data: Any) -> Dict[str, Any]:
         result["time_dimension"]["target_horizon_weeks"] = _coerce_int(
             time_dimension.get("target_horizon_weeks")
         )
-        result["time_dimension"]["weekly_hours"] = _coerce_int(
-            time_dimension.get("weekly_hours")
-        )
-        result["time_dimension"]["milestones"] = _coerce_text_list(
-            time_dimension.get("milestones")
-        )
+        result["time_dimension"]["weekly_hours"] = _coerce_int(time_dimension.get("weekly_hours"))
+        result["time_dimension"]["milestones"] = _coerce_text_list(time_dimension.get("milestones"))
 
     goals = data.get("goals", [])
     if isinstance(goals, list):
@@ -130,12 +198,8 @@ def coerce_goal_constraints_v1(data: Any) -> Dict[str, Any]:
 
     acceptable_cost = data.get("acceptable_cost", {})
     if isinstance(acceptable_cost, dict):
-        result["acceptable_cost"]["max_budget_cny"] = _coerce_float(
-            acceptable_cost.get("max_budget_cny")
-        )
-        result["acceptable_cost"]["max_delay_weeks"] = _coerce_int(
-            acceptable_cost.get("max_delay_weeks")
-        )
+        result["acceptable_cost"]["max_budget_cny"] = _coerce_float(acceptable_cost.get("max_budget_cny"))
+        result["acceptable_cost"]["max_delay_weeks"] = _coerce_int(acceptable_cost.get("max_delay_weeks"))
         result["acceptable_cost"]["max_failure_trials"] = _coerce_int(
             acceptable_cost.get("max_failure_trials")
         )
@@ -186,12 +250,8 @@ def merge_goal_constraints(base: Dict[str, Any], delta: Dict[str, Any]) -> Dict[
             merged["acceptable_cost"][key] = value
 
     if update.get("hard_constraints"):
-        merged["hard_constraints"] = list(
-            dict.fromkeys(
-                tuple(sorted(item.items())) for item in merged["hard_constraints"] + update["hard_constraints"]
-            )
-        )
-        merged["hard_constraints"] = [dict(item) for item in merged["hard_constraints"]]
+        packed = [tuple(sorted(item.items())) for item in merged["hard_constraints"] + update["hard_constraints"]]
+        merged["hard_constraints"] = [dict(item) for item in dict.fromkeys(packed)]
 
     for key in ("resource_types", "locations", "languages", "delivery_modes"):
         if update["preferences"].get(key):
@@ -204,49 +264,383 @@ def merge_goal_constraints(base: Dict[str, Any], delta: Dict[str, Any]) -> Dict[
     return merged
 
 
-def _to_weeks(value: int, unit: str) -> int:
+def _split_sentences(text: str) -> List[str]:
+    parts = [part.strip() for part in re.split(r"[。！？!?;.\n]+", text) if part.strip()]
+    return parts
+
+
+def _parse_en_number(text: str) -> int | None:
+    parts = [part for part in text.lower().replace("-", " ").split() if part]
+    if not parts:
+        return None
+    total = 0
+    current = 0
+    for part in parts:
+        if part == "hundred":
+            current = max(current, 1) * 100
+            continue
+        value = EN_NUMBER_MAP.get(part)
+        if value is None:
+            return None
+        current += value
+    total += current
+    return total if total > 0 else None
+
+
+def _parse_zh_number(text: str) -> int | None:
+    token = text.strip()
+    if not token:
+        return None
+
+    if token in ZH_NUMBER_MAP:
+        return ZH_NUMBER_MAP[token]
+
+    total = 0
+    current = 0
+    for char in token:
+        if char in ZH_NUMBER_MAP:
+            current = ZH_NUMBER_MAP[char]
+            continue
+        unit = ZH_UNIT_MAP.get(char)
+        if unit is None:
+            return None
+        if current == 0:
+            current = 1
+        total += current * unit
+        current = 0
+    return total + current if (total + current) > 0 else None
+
+
+def _parse_number_token(token: str) -> float | None:
+    cleaned = token.strip().lower().replace(",", "")
+    if not cleaned:
+        return None
+    try:
+        return float(cleaned)
+    except Exception:
+        pass
+    en_num = _parse_en_number(cleaned)
+    if en_num is not None:
+        return float(en_num)
+    zh_num = _parse_zh_number(token)
+    if zh_num is not None:
+        return float(zh_num)
+    return None
+
+
+def _to_weeks(value: float, unit: str) -> int:
     normalized = unit.lower().strip()
-    if normalized in {"week", "weeks", "w", "周"}:
-        return value
-    if normalized in {"month", "months", "m", "月", "个月"}:
-        return int(round(value * 4.345))
-    if normalized in {"year", "years", "y", "年"}:
+    if normalized in {"year", "years", "yr", "yrs", "年"}:
         return int(round(value * 52))
-    return value
+    if normalized in {"month", "months", "mo", "mos", "月", "个月"}:
+        return int(round(value * 4.345))
+    if normalized in {"week", "weeks", "wk", "wks", "w", "周", "星期"}:
+        return int(round(value))
+    if normalized in {"day", "days", "d", "天"}:
+        return int(round(value / 7))
+    return int(round(value))
+
+
+def _extract_horizon_weeks(raw: str) -> int | None:
+    lowered = raw.lower()
+    for regex in (WITHIN_RE_EN, WITHIN_RE_ZH):
+        match = regex.search(lowered)
+        if not match:
+            continue
+        first = _parse_number_token(match.group("a"))
+        second = _parse_number_token(match.group("b") or "")
+        if first is None:
+            continue
+        value = max(first, second or first)
+        return _to_weeks(value, match.group("unit"))
+
+    values: List[int] = []
+    for match in TIME_RE.finditer(lowered):
+        first = _parse_number_token(match.group("a"))
+        second = _parse_number_token(match.group("b") or "")
+        if first is None:
+            continue
+        value = max(first, second or first)
+        values.append(_to_weeks(value, match.group("unit")))
+    if not values:
+        return None
+    return max(values)
+
+
+def _extract_weekly_hours(raw: str) -> int | None:
+    patterns = [
+        re.compile(rf"(?P<n>{NUMBER_TOKEN})\s*(?:hours?|hrs?|h)\s*(?:per|a)?\s*week", re.IGNORECASE),
+        re.compile(rf"(?:per|a)\s*week\s*(?P<n>{NUMBER_TOKEN})\s*(?:hours?|hrs?|h)", re.IGNORECASE),
+        re.compile(rf"每周(?:可投入|能投入|投入|学习)?\s*(?P<n>{NUMBER_TOKEN})\s*(?:小时|h)"),
+    ]
+    for pattern in patterns:
+        match = pattern.search(raw)
+        if not match:
+            continue
+        value = _parse_number_token(match.group("n"))
+        if value is not None:
+            return int(round(value))
+    return None
+
+
+def _extract_budget(raw: str) -> float | None:
+    patterns = [
+        re.compile(
+            r"(?:budget|cost|spend|tuition|预算|费用|花费|成本)[^\d]{0,12}(?:rmb|cny|¥|￥)?\s*(\d[\d,]*)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(?:under|below|less than|up to|不超过|最多)\s*(?:rmb|cny|¥|￥)?\s*(\d[\d,]*)\s*(?:for courses|for learning|学习|课程)?",
+            re.IGNORECASE,
+        ),
+    ]
+    for pattern in patterns:
+        match = pattern.search(raw)
+        if not match:
+            continue
+        value = _coerce_float(match.group(1))
+        if value is not None:
+            return value
+    return None
+
+
+def _extract_delay_weeks(raw: str) -> int | None:
+    pattern = re.compile(
+        rf"(?P<n>{NUMBER_TOKEN})\s*(?P<unit>{TIME_UNIT_PATTERN}).{{0,12}}(?:delay|postpone|延期|延后)",
+        re.IGNORECASE,
+    )
+    match = pattern.search(raw)
+    if not match:
+        return None
+    value = _parse_number_token(match.group("n"))
+    if value is None:
+        return None
+    return _to_weeks(value, match.group("unit"))
+
+
+def _infer_intensity(raw: str) -> str | None:
+    lowered = raw.lower()
+    low_markers = [
+        "do not want overtime",
+        "don't want overtime",
+        "prefer not to work long-term overtime",
+        "not overly exhausting",
+        "work-life balance",
+        "cannot accept frequent changes",
+        "不想长期加班",
+        "不想太累",
+        "不接受频繁变动",
+        "稳定",
+        "不卷",
+    ]
+    high_markers = [
+        "high-intensity",
+        "high intensity",
+        "high-pressure",
+        "high pressure",
+        "long hours",
+        "996",
+        "all-in",
+        "rapid growth",
+        "愿意高强度",
+        "高强度",
+        "愿意加班",
+        "冲刺",
+    ]
+    low_score = sum(1 for marker in low_markers if marker in lowered)
+    high_score = sum(1 for marker in high_markers if marker in lowered)
+    if low_score > high_score and low_score > 0:
+        return "low"
+    if high_score > low_score and high_score > 0:
+        return "high"
+    return None
+
+
+def _extract_locations(raw: str) -> List[str]:
+    city_aliases = {
+        "beijing": ["beijing", "北京"],
+        "shanghai": ["shanghai", "上海"],
+        "shenzhen": ["shenzhen", "深圳"],
+        "guangzhou": ["guangzhou", "广州"],
+    }
+    lowered = raw.lower()
+    found: List[str] = []
+    for city, aliases in city_aliases.items():
+        if any(alias in lowered for alias in aliases):
+            found.append(city)
+    if "first-tier city" in lowered or "一线城市" in raw:
+        found.append("first-tier city")
+    return list(dict.fromkeys(found))
+
+
+def _extract_resource_types(raw: str) -> List[str]:
+    lowered = raw.lower()
+    found: List[str] = []
+    if any(word in lowered for word in ("course", "courses", "tutorial", "certification", "课程", "教程")):
+        found.append("course")
+    if any(word in lowered for word in ("project", "portfolio", "case study", "项目", "实战")):
+        found.append("project")
+    return list(dict.fromkeys(found))
+
+
+def _extract_delivery_modes(raw: str) -> List[str]:
+    lowered = raw.lower()
+    found: List[str] = []
+    if any(word in lowered for word in ("remote", "online", "virtual", "远程", "线上")):
+        found.append("online")
+    if any(word in lowered for word in ("onsite", "offline", "in person", "线下", "现场")):
+        found.append("offline")
+    return list(dict.fromkeys(found))
+
+
+def _extract_languages(raw: str) -> List[str]:
+    lowered = raw.lower()
+    found: List[str] = []
+    if "english" in lowered or "英语" in raw:
+        found.append("english")
+    if "chinese" in lowered or "中文" in raw:
+        found.append("chinese")
+    return found
 
 
 def _infer_operator(sentence: str) -> str:
     lowered = sentence.lower()
-    if "at least" in lowered or "不少于" in sentence or "至少" in sentence:
+    if any(marker in lowered for marker in ("at least", "不少于", "至少")):
         return ">="
-    if "at most" in lowered or "不超过" in sentence or "至多" in sentence:
+    if any(marker in lowered for marker in ("at most", "no more than", "不超过", "至多")):
         return "<="
-    if "不能" in sentence or "must not" in lowered or "cannot" in lowered or "can't" in lowered:
+    if any(
+        marker in lowered
+        for marker in (
+            "must not",
+            "cannot",
+            "can't",
+            "do not want",
+            "don't want",
+            "prefer not to",
+            "cannot accept",
+            "不想",
+            "不能",
+            "不接受",
+            "不考虑",
+            "不要",
+            "不希望",
+        )
+    ):
         return "not"
     return "must"
 
 
-def _extract_goals(text: str) -> List[Dict[str, Any]]:
-    goals: List[Dict[str, Any]] = []
-    lines = [line.strip() for line in re.split(r"[\n。！？!?]", text) if line.strip()]
-    rank = 1
-    for line in lines:
-        lowered = line.lower()
-        if any(keyword in lowered for keyword in ("goal", "target", "希望", "目标", "想要", "达成", "完成", "拿到")):
-            goals.append(
+def _extract_hard_constraints(raw: str) -> List[Dict[str, Any]]:
+    constraints: List[Dict[str, Any]] = []
+    markers = (
+        "must",
+        "must not",
+        "cannot",
+        "can't",
+        "only",
+        "at least",
+        "at most",
+        "need to",
+        "require",
+        "do not want",
+        "don't want",
+        "prefer not to",
+        "cannot accept",
+        "cannot be",
+        "不想",
+        "不能",
+        "必须",
+        "只接受",
+        "至少",
+        "至多",
+        "不超过",
+        "不接受",
+        "不考虑",
+        "最好不要",
+    )
+    for sentence in _split_sentences(raw):
+        lowered = sentence.lower()
+        if any(marker in lowered for marker in markers):
+            constraints.append(
                 {
-                    "description": line,
-                    "metric": "",
-                    "target_value": "",
-                    "deadline_weeks": None,
-                    "priority_rank": rank,
-                    "weight": max(0.1, 1.0 - (rank - 1) * 0.2),
+                    "name": sentence[:64],
+                    "operator": _infer_operator(sentence),
+                    "value": sentence,
+                    "unit": "",
+                    "priority": "hard",
                 }
             )
-            rank += 1
-        if len(goals) >= 5:
+    packed = [tuple(sorted(item.items())) for item in constraints]
+    return [dict(item) for item in dict.fromkeys(packed)]
+
+
+def _extract_goal_deadline_weeks(sentence: str) -> int | None:
+    values: List[int] = []
+    for match in TIME_RE.finditer(sentence.lower()):
+        first = _parse_number_token(match.group("a"))
+        second = _parse_number_token(match.group("b") or "")
+        if first is None:
+            continue
+        values.append(_to_weeks(max(first, second or first), match.group("unit")))
+    if not values:
+        return None
+    return max(values)
+
+
+def _extract_goals(raw: str) -> List[Dict[str, Any]]:
+    goals: List[Dict[str, Any]] = []
+    goal_markers = (
+        "goal",
+        "target",
+        "aim",
+        "hope",
+        "want",
+        "would like",
+        "plan to",
+        "ideally",
+        "希望",
+        "目标",
+        "想要",
+        "打算",
+        "希望能",
+    )
+    rank = 1
+    for sentence in _split_sentences(raw):
+        lowered = sentence.lower()
+        if not any(marker in lowered for marker in goal_markers):
+            continue
+        if len(sentence) < 8:
+            continue
+
+        metric = ""
+        target_value = ""
+        income_match = MONTHLY_INCOME_RE.search(sentence)
+        if income_match:
+            metric = "income_monthly_cny"
+            target_value = income_match.group(1).replace(",", "")
+
+        goals.append(
+            {
+                "description": sentence,
+                "metric": metric,
+                "target_value": target_value,
+                "deadline_weeks": _extract_goal_deadline_weeks(sentence),
+                "priority_rank": rank,
+                "weight": max(0.1, 1.0 - (rank - 1) * 0.15),
+            }
+        )
+        rank += 1
+        if len(goals) >= 8:
             break
     return goals
+
+
+def _trim_hint(text: str, max_len: int = 200) -> str:
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    if len(cleaned) <= max_len:
+        return cleaned
+    return cleaned[: max_len - 3].rstrip() + "..."
 
 
 def extract_goal_constraints_from_text(text: str) -> Dict[str, Any]:
@@ -255,90 +649,42 @@ def extract_goal_constraints_from_text(text: str) -> Dict[str, Any]:
     if not raw:
         return payload
 
-    lowered = raw.lower()
+    horizon_weeks = _extract_horizon_weeks(raw)
+    if horizon_weeks is not None:
+        payload["time_dimension"]["target_horizon_weeks"] = horizon_weeks
 
-    # Time horizon
-    horizon_candidates: List[int] = []
-    for match in re.finditer(r"(\d+)\s*(week|weeks|w|周|month|months|月|个月|year|years|年)", lowered):
-        value = int(match.group(1))
-        unit = match.group(2)
-        weeks = _to_weeks(value, unit)
-        horizon_candidates.append(weeks)
-    if horizon_candidates:
-        payload["time_dimension"]["target_horizon_weeks"] = min(horizon_candidates)
+    weekly_hours = _extract_weekly_hours(raw)
+    if weekly_hours is not None:
+        payload["time_dimension"]["weekly_hours"] = weekly_hours
 
-    # Weekly hours
-    hours_match = re.search(
-        r"(\d+)\s*(小时|h|hour|hours)\s*(/week|per week|每周|每星期|每周可投入)?",
-        lowered,
-    )
-    if hours_match:
-        payload["time_dimension"]["weekly_hours"] = int(hours_match.group(1))
+    budget = _extract_budget(raw)
+    if budget is not None:
+        payload["acceptable_cost"]["max_budget_cny"] = budget
 
-    # Budget
-    budget_match_cny = re.search(r"(预算|cost|budget|费用)[^\d]{0,8}(\d{2,6})", lowered)
-    if budget_match_cny:
-        payload["acceptable_cost"]["max_budget_cny"] = float(budget_match_cny.group(2))
+    delay = _extract_delay_weeks(raw)
+    if delay is not None:
+        payload["acceptable_cost"]["max_delay_weeks"] = delay
 
-    # Delay tolerance
-    delay_match = re.search(r"(\d+)\s*(week|weeks|周).{0,8}(delay|延期|延后)", lowered)
-    if delay_match:
-        payload["acceptable_cost"]["max_delay_weeks"] = _to_weeks(
-            int(delay_match.group(1)),
-            delay_match.group(2),
-        )
+    intensity = _infer_intensity(raw)
+    if intensity:
+        payload["acceptable_cost"]["intensity_preference"] = intensity
 
-    # Intensity preference
-    if any(word in lowered for word in ("轻量", "low intensity", "轻松", "不卷")):
-        payload["acceptable_cost"]["intensity_preference"] = "low"
-    elif any(word in lowered for word in ("高强度", "intensive", "all-in", "冲刺")):
-        payload["acceptable_cost"]["intensity_preference"] = "high"
-
-    # Resource type preferences
-    if any(word in lowered for word in ("course", "课程", "教程")):
-        payload["preferences"]["resource_types"].append("course")
-    if any(word in lowered for word in ("project", "项目", "实战", "portfolio")):
-        payload["preferences"]["resource_types"].append("project")
-
-    # Delivery mode preferences
-    if any(word in lowered for word in ("remote", "online", "线上", "远程")):
-        payload["preferences"]["delivery_modes"].append("online")
-    if any(word in lowered for word in ("onsite", "线下", "面授")):
-        payload["preferences"]["delivery_modes"].append("offline")
-
-    # Hard constraints from modal language.
-    for sentence in re.split(r"[。！？!?\n]", raw):
-        line = sentence.strip()
-        if not line:
-            continue
-        lowered_line = line.lower()
-        if any(
-            marker in lowered_line
-            for marker in ("must", "must not", "cannot", "can't", "only", "at least", "at most")
-        ) or any(marker in line for marker in ("必须", "不能", "只接受", "至少", "不超过")):
-            payload["hard_constraints"].append(
-                {
-                    "name": line[:40],
-                    "operator": _infer_operator(line),
-                    "value": line,
-                    "unit": "",
-                    "priority": "hard",
-                }
-            )
-
+    payload["hard_constraints"] = _extract_hard_constraints(raw)
     payload["goals"] = _extract_goals(raw)
 
-    query_hints: List[str] = []
-    for goal in payload["goals"][:3]:
-        if goal["description"]:
-            query_hints.append(goal["description"])
-    for item in payload["hard_constraints"][:2]:
-        if item["value"]:
-            query_hints.append(item["value"])
-    payload["query_hints"] = list(dict.fromkeys(query_hints))
+    payload["preferences"]["resource_types"] = _extract_resource_types(raw)
+    payload["preferences"]["locations"] = _extract_locations(raw)
+    payload["preferences"]["languages"] = _extract_languages(raw)
+    payload["preferences"]["delivery_modes"] = _extract_delivery_modes(raw)
 
-    payload["preferences"]["resource_types"] = list(dict.fromkeys(payload["preferences"]["resource_types"]))
-    payload["preferences"]["delivery_modes"] = list(dict.fromkeys(payload["preferences"]["delivery_modes"]))
+    query_hints: List[str] = []
+    for goal in payload["goals"][:4]:
+        if goal["description"]:
+            query_hints.append(_trim_hint(goal["description"]))
+    for item in payload["hard_constraints"][:3]:
+        if item["value"]:
+            query_hints.append(_trim_hint(item["value"]))
+    payload["query_hints"] = list(dict.fromkeys([item for item in query_hints if item]))
     return payload
 
 
@@ -347,10 +693,12 @@ def derive_strategy_tags(goal_constraints: Dict[str, Any]) -> List[str]:
     time_dimension = goal_constraints.get("time_dimension", {})
     acceptable_cost = goal_constraints.get("acceptable_cost", {})
     preferences = goal_constraints.get("preferences", {})
+    goals = goal_constraints.get("goals", [])
 
     horizon = _coerce_int(time_dimension.get("target_horizon_weeks"))
     weekly_hours = _coerce_int(time_dimension.get("weekly_hours"))
     budget = _coerce_float(acceptable_cost.get("max_budget_cny"))
+    intensity = str(acceptable_cost.get("intensity_preference", "")).strip().lower()
     hard_constraints = goal_constraints.get("hard_constraints", [])
 
     if horizon is not None:
@@ -370,21 +718,35 @@ def derive_strategy_tags(goal_constraints: Dict[str, Any]) -> List[str]:
             tags.append("mid_bandwidth")
 
     if budget is not None:
-        if budget < 500:
+        if budget < 1000:
             tags.append("low_budget")
-        elif budget > 5000:
+        elif budget > 10000:
             tags.append("high_budget")
         else:
             tags.append("mid_budget")
 
+    if intensity == "low":
+        tags.append("low_intensity")
+    elif intensity == "high":
+        tags.append("high_intensity")
+
     if hard_constraints:
         tags.append("constraint_driven")
 
+    goal_text = " ".join(str(item.get("description", "")) for item in goals).lower()
+    if any(keyword in goal_text for keyword in ("stable", "stability", "稳定")):
+        tags.append("stability_first")
+    if any(keyword in goal_text for keyword in ("high income", "rapid growth", "高收入", "成长速度")):
+        tags.append("growth_first")
+    if any(keyword in goal_text for keyword in ("ai", "machine learning", "算法", "人工智能")):
+        tags.append("ai_oriented")
+
     for resource_type in preferences.get("resource_types", []):
         tags.append(f"prefer_{str(resource_type).lower()}")
-
     for mode in preferences.get("delivery_modes", []):
         tags.append(f"prefer_{str(mode).lower()}")
+    if preferences.get("locations"):
+        tags.append("location_bound")
 
     return list(dict.fromkeys(tags))
 

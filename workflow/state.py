@@ -36,6 +36,10 @@ class ChatConversationState(TypedDict, total=False):
     next_question: str
     asked_questions: List[str]
     attempts: Dict[str, int]
+    question_stage: str
+    targeted_rounds: int
+    max_targeted_rounds: int
+    question_phase_complete: bool
     conversation_complete: bool
     route: str
     route_reasons: List[str]

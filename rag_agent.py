@@ -44,6 +44,31 @@ def _format_evidence(doc: Dict[str, str]) -> str:
     return f"[{source_id}:{chunk_id}] {title}"
 
 
+def _collapse_results_by_source(results: List[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for item in results:
+        score = float(item.get("score", 0.0))
+        doc = item.get("doc") or {}
+        source_id = str(doc.get("source_id", "")).strip()
+        fallback = f"{doc.get('title', '')}::{doc.get('chunk_id', '')}"
+        key = source_id or fallback
+
+        if key not in grouped:
+            grouped[key] = {"score": score, "doc": doc, "snippets": [str(doc.get("text", "")).strip()]}
+            continue
+
+        if score > float(grouped[key]["score"]):
+            grouped[key]["score"] = score
+            grouped[key]["doc"] = doc
+
+        snippet = str(doc.get("text", "")).strip()
+        if snippet and snippet not in grouped[key]["snippets"]:
+            grouped[key]["snippets"].append(snippet)
+
+    collapsed = sorted(grouped.values(), key=lambda value: float(value["score"]), reverse=True)
+    return collapsed[:top_k]
+
+
 class RagAgent:
     def __init__(
         self,
@@ -98,7 +123,7 @@ class RagAgent:
         hint_text = " ".join(str(item).strip() for item in (query_hints or []) if str(item).strip())
         query = f"{career_key} {query_hint} {hint_text}".strip()
 
-        filters = {"career": career_key}
+        filters: Dict[str, Any] = {"career": [career_key, "general"] if career_key != "unknown" else "general"}
         if doc_type:
             filters["type"] = doc_type
         for key, value in (rag_filters or {}).items():
@@ -109,19 +134,24 @@ class RagAgent:
                 continue
             filters[key] = value
 
-        results = self._store.search(query, top_k=top_k, filters=filters)
+        results = self._store.search(query, top_k=max(top_k * 3, top_k + 2), filters=filters)
         if not results:
+            return ([], [], 0.0)
+
+        unique_results = _collapse_results_by_source(results, top_k=top_k)
+        if not unique_results:
             return ([], [], 0.0)
 
         item_text_key = str(section.get("item_text_key", "text"))
         items: List[Dict[str, Any]] = []
         evidence: List[Dict[str, str]] = []
-        top_score = float(results[0]["score"])
+        top_score = float(unique_results[0]["score"])
 
-        for result in results:
+        for result in unique_results:
             doc = result["doc"]
+            snippets = [snippet for snippet in result.get("snippets", []) if snippet]
             title = str(doc.get("title", "Knowledge"))
-            text = str(doc.get("text", ""))
+            text = "\n".join(snippets[:2]) if snippets else str(doc.get("text", ""))
             item: Dict[str, Any] = {"title": title, item_text_key: text}
             for extra_key in ("url", "resource_type"):
                 value = str(doc.get(extra_key, "")).strip()

@@ -74,6 +74,15 @@
       "top_k": 6,
       "item_text_key": "notes",
       "clarify_message": "Low confidence. Share preferred domain or platform to narrow resources."
+    },
+    {
+      "name": "profile_case",
+      "label": "Similar User Cases",
+      "doc_type": "profile_case",
+      "query_hint": "similar constraints goals profile cases",
+      "top_k": 2,
+      "item_text_key": "summary",
+      "clarify_message": "No close profile case found. Ask one more question about constraints or risk tolerance."
     }
   ]
 }
