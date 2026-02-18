@@ -43,3 +43,35 @@ def evaluation_feedback_message(evaluation: Dict[str, Any]) -> str:
     if evaluation.get("notes"):
         parts.append("Notes: " + "; ".join(evaluation.get("notes", [])))
     return " ".join(parts)
+
+
+def evaluate_profile(profile: Dict[str, Any], required_fields: List[str]) -> Dict[str, Any]:
+    missing: List[str] = []
+    for field in required_fields:
+        value = profile.get(field)
+        if value is None:
+            missing.append(field)
+            continue
+        if isinstance(value, list) and not value:
+            missing.append(field)
+            continue
+        if isinstance(value, str) and not value.strip():
+            missing.append(field)
+            continue
+
+    notes: List[str] = []
+    if missing:
+        notes.append("missing_fields")
+
+    score = 1.0
+    if missing:
+        score -= min(0.6, 0.08 * len(missing))
+    if score < 0:
+        score = 0.0
+
+    return {
+        "valid": len(missing) == 0,
+        "missing_fields": missing,
+        "notes": notes,
+        "score": round(score, 2),
+    }

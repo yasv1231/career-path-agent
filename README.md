@@ -1,246 +1,68 @@
-🌟 AI Career Path Recommendation Agent
+# Career Path Agent (Minimal Runtime)
 
-🧠 Multi-Agent Career Guidance System using Python
+This repository now keeps only the core runtime for the single-entry conversation workflow.
 
-Google AI Agents Intensive — Capstone Project
+## What It Does
 
-🚀 Problem:
+- Accepts user messages in CLI.
+- Extracts profile fields from conversation context.
+- Routes conversation to ask follow-up questions or generate a plan.
+- Optionally enriches output with local RAG content from `data/rag_corpus.json`.
+- Uses a reference-style RAG pipeline (chunk -> embed -> Chroma retrieve -> rerank).
 
-Students often struggle to choose the right career because of confusion like:
-->Which career suits my skills?
-->What courses should I learn?
-->What learning roadmap should I follow?
-->How do I start, and what comes next?
+## Key Files
 
-💡 Solution:
+- `main.py`: program entrypoint.
+- `workflow/`: main workflow pipeline (`graph_chat.py`, `routing.py`, `extractor.py`, etc.).
+- `rag_agent.py` and `rag_store.py`: RAG retrieval helpers.
+- `data/rag_resources.json`: replaceable RAG config (aliases, query hints, thresholds, sections).
+- `data/rag_corpus.json`: replaceable knowledge corpus.
+- `reference_rag_kb.py`: reference-style RAG program adapted from the linked VideoCode notebook.
+- `scripts/build_rag_corpus.py`: convert raw `.md/.txt` docs into `data/rag_corpus.json`.
+- `langsmith_integration.py`: tracing and model client setup.
+- `mcp.config.json`: optional MCP server config.
+- `AGENTS.md`: repository contribution guidelines.
 
-This AI agent collects student details and provides:
-✔ Best-fit career recommendation
-✔ Required learning topics
-✔ FREE high-quality courses with direct links
-✔ 8-week personalized learning roadmap
-✔ Smart memory — remembers past user profile
+## Run
 
-🧩 System Architecture:
-
-User Input
-    ↓
-Career Agent        → Predicts best career
-Course Agent        → Recommends learning topics
-Tool Agent          → Fetches FREE course links
-Roadmap Agent       → Builds 8-week learning plan
-Evaluator Agent     → Explains why career matches the profile
-Memory Manager      → Stores and retrieves user profile
-
-🔥 Key Features (Google Score Requirements):
-
-| Feature             | Status                                         |
-| ------------------- | ---------------------------------------------- |
-| Multi-Agent System  | ✔ Career + Course + Tool + Roadmap + Evaluator |
-| Tools               | ✔ Free course link collector                   |
-| Memory              | ✔ Stores and reuses user profile               |
-| State Management    | ✔ Detects past session and continues           |
-| Real-World Use Case | ✔ Student career guidance                      |
-| CLI Prototype       | ✔ Fully working                                |
-
-
-📂 Project Structure (root):
-
-career_path_agent/
-│ main.py
-│ langgraph_flow.py
-│ workflow/
-│ career_agent.py
-│ course_agent.py
-│ tool_agent.py
-│ roadmap_agent.py
-│ evaluator_agent.py
-│ memory_manager.py
-│ rag_agent.py
-│ rag_store.py
-│ langsmith_integration.py
-│ README.md
-│ requirements.txt
-│ input.txt
-│ user_memory.json
-│ mcp.config.json
-│ visual_test.py
-│ _local_langgraph.py
-│
-├─ skills/
-│   ├─ extraction-skill/
-│   ├─ memory-skill/
-│   ├─ routing-skill/
-│   └─ validation-skill/
-│
-└─ data/
-    └─ rag_corpus.json
-
-(Note: many agent modules live in the repository root for simplicity.)
-
-🛠️ Run Locally:
-
-Requirements
-Python ≥ 3.8
-
-Create a virtual environment and install deps:
-
-```bash
+```powershell
 python -m venv .venv
-source .venv/bin/activate    # macOS / Linux
-.venv\Scripts\Activate.ps1  # Windows PowerShell
+.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-```
-
-Execution:
-
-```bash
 python main.py
 ```
 
-🖥️ Sample Output:
+## Build RAG Corpus From Text Docs
 
-🎯 Recommended Career Path for you: Data Analyst
-📚 Suggested Topics to Learn:
- - Excel for Data Analysis
- - SQL for Data Analysis
- - Python with Pandas & NumPy
+1. Put raw docs into `data/knowledge_docs/` (`.md` or `.txt`).
+2. Front matter is optional; the builder can infer `career/type/title` from free-form text.
+3. Build corpus:
 
-🌐 FREE Courses to Start:
- - Google Data Analytics Certificate → Coursera
- - Excel for Data Analysis → FreeCodeCamp
- - SQL Full Course → YouTube
+```powershell
+python scripts/build_rag_corpus.py --docs-dir data/knowledge_docs --output data/rag_corpus.json
+```
 
-🗺️ Personalized 8-Week Roadmap
+Optional semantic refinement via LLM:
 
-📝 Evaluation: Reason why this career matches your profile
+```powershell
+python scripts/build_rag_corpus.py --docs-dir data/knowledge_docs --output data/rag_corpus.json --use-llm-semantic
+```
 
-🎯 Why This Project Matters:
+4. Run the app. RAG index is auto-built in `data/rag_chroma/` on first retrieval.
 
-This project gives students:
-->a clear direction for their future
-->course resources to start immediately
-->step-by-step roadmap
-->long-term guidance using memory
+## Run The Reference-Style RAG Program
 
-🔮 Future Enhancements:
+```powershell
+python reference_rag_kb.py --docs-dir data/knowledge_docs --query "What are the core skills of a data analyst?"
+```
 
-->Streamlit Web UI
-->Gemini / LLM conversational agent
-->Live API search for jobs & courses
-->Deployment using Cloud Run / Agent Engine
+## Configuration
 
-👩‍💻 Author:
+Set credentials in `.env` if you need remote model or tracing:
 
-Developed for: Google AI Agents Intensive (Capstone)
-👤 Participant: Asapu Priyanjali Satya Sri
+- `OPENAI_API_KEY`
+- `OPENAI_MODEL`
+- `OPENAI_BASE_URL` (optional)
+- `LANGSMITH_API_KEY` (optional)
 
-⭐ If you like this project, please give the repository a star!
-🌟 AI Career Path Recommendation Agent
-
-🧠 Multi-Agent Career Guidance System using Python
-
-Google AI Agents Intensive — Capstone Project
-
-🚀 Problem:
-
-Students often struggle to choose the right career because of confusion like:
-->Which career suits my skills?
-->What courses should I learn?
-->What learning roadmap should I follow?
-->How do I start, and what comes next?
-
-💡 Solution:
-
-This AI agent collects student details and provides:
-✔ Best-fit career recommendation
-✔ Required learning topics
-✔ FREE high-quality courses with direct links
-✔ 8-week personalized learning roadmap
-✔ Smart memory — remembers past user profile
-
-🧩 System Architecture:
-
-User Input
-    ↓
-Career Agent        → Predicts best career
-Course Agent        → Recommends learning topics
-Tool Agent          → Fetches FREE course links
-Roadmap Agent       → Builds 8-week learning plan
-Evaluator Agent     → Explains why career matches the profile
-Memory Manager      → Stores and retrieves user profile
-
-🔥 Key Features (Google Score Requirements):
-
-| Feature             | Status                                         |
-| ------------------- | ---------------------------------------------- |
-| Multi-Agent System  | ✔ Career + Course + Tool + Roadmap + Evaluator |
-| Tools               | ✔ Free course link collector                   |
-| Memory              | ✔ Stores and reuses user profile               |
-| State Management    | ✔ Detects past session and continues           |
-| Real-World Use Case | ✔ Student career guidance                      |
-| CLI Prototype       | ✔ Fully working                                |
-
-
-📂 Project Structure:
-
-career_path_agent/
-│ main.py
-│
-├─ agents/
-│   ├─ career_agent.py
-│   ├─ course_agent.py
-│   ├─ tool_agent.py
-│   ├─ roadmap_agent.py
-│   └─ evaluator_agent.py
-│
-└─ memory/
-    └─ memory_manager.py
-
-🛠️ Run Locally:
-
-Requirements
-Python ≥ 3.8
-
-Execution:
-
-python main.py
-
-🖥️ Sample Output:
-
-🎯 Recommended Career Path for you: Data Analyst
-📚 Suggested Topics to Learn:
- - Excel for Data Analysis
- - SQL for Data Analysis
- - Python with Pandas & NumPy
-
-🌐 FREE Courses to Start:
- - Google Data Analytics Certificate → Coursera
- - Excel for Data Analysis → FreeCodeCamp
- - SQL Full Course → YouTube
-
-🗺️ Personalized 8-Week Roadmap
-
-📝 Evaluation: Reason why this career matches your profile
-
-🎯 Why This Project Matters:
-
-This project gives students:
-->a clear direction for their future
-->course resources to start immediately
-->step-by-step roadmap
-->long-term guidance using memory
-
-🔮 Future Enhancements:
-
-->Streamlit Web UI
-->Gemini / LLM conversational agent
-->Live API search for jobs & courses
-->Deployment using Cloud Run / Agent Engine
-
-👩‍💻 Author:
-
-Developed for: Google AI Agents Intensive (Capstone)
-👤 Participant: Asapu Priyanjali Satya Sri
-
-⭐ If you like this project, please give the repository a star!
+Do not commit real secrets.

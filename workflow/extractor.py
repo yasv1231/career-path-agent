@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List
 
-from .state import EXTRACT_ALLOWED_INTENTS, EXTRACT_SCHEMA_VERSION, EXTRACT_SCHEMA_V1
+from .state import (
+    EXTRACT_ALLOWED_INTENTS,
+    EXTRACT_SCHEMA_VERSION,
+    EXTRACT_SCHEMA_V1,
+    PROFILE_SCHEMA_VERSION,
+)
 
 
 def extract_json_block(text: str) -> str | None:
@@ -255,3 +260,111 @@ def retry_prompt(base_system: str, last_answer: str, errors: List[Dict[str, str]
         f"{base_system}\n\nInput text:\n{last_answer}\n\nSchema:\n{schema_json}\n\n"
         f"Validation errors:\n{error_hint}\n\nFix the JSON."
     )
+
+
+def default_profile() -> Dict[str, Any]:
+    return {
+        "schema_version": PROFILE_SCHEMA_VERSION,
+        "education": None,
+        "skills": [],
+        "interests": [],
+        "target_role": None,
+        "hours_per_week": None,
+        "experience_level": None,
+        "constraints": [],
+        "location": None,
+        "timeline_weeks": None,
+        "industry": None,
+        "goals": [],
+    }
+
+
+def _coerce_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.replace(";", ",").split(",")]
+        return [part for part in parts if part]
+    return []
+
+
+def _coerce_number(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = value.strip()
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+    return None
+
+
+def _normalize_unknown(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    cleaned = value.strip().lower()
+    if cleaned in {"unknown", "unsure", "n/a", "na", "none", "暂无", "不确定", "不知道"}:
+        return None
+    return value
+
+
+def coerce_profile_v1(data: Any) -> Dict[str, Any]:
+    result = default_profile()
+    if not isinstance(data, dict):
+        return result
+
+    if isinstance(data.get("schema_version"), str):
+        result["schema_version"] = data.get("schema_version")
+
+    if isinstance(data.get("education"), str):
+        value = _normalize_unknown(data.get("education"))
+        result["education"] = value.strip() if isinstance(value, str) and value.strip() else None
+    if isinstance(data.get("target_role"), str):
+        value = _normalize_unknown(data.get("target_role"))
+        result["target_role"] = value.strip() if isinstance(value, str) and value.strip() else None
+    if isinstance(data.get("experience_level"), str):
+        value = _normalize_unknown(data.get("experience_level"))
+        result["experience_level"] = value.strip() if isinstance(value, str) and value.strip() else None
+    if isinstance(data.get("location"), str):
+        value = _normalize_unknown(data.get("location"))
+        result["location"] = value.strip() if isinstance(value, str) and value.strip() else None
+    if isinstance(data.get("industry"), str):
+        value = _normalize_unknown(data.get("industry"))
+        result["industry"] = value.strip() if isinstance(value, str) and value.strip() else None
+
+    result["skills"] = _coerce_list(data.get("skills"))
+    result["interests"] = _coerce_list(data.get("interests"))
+    result["constraints"] = _coerce_list(data.get("constraints"))
+    result["goals"] = _coerce_list(data.get("goals"))
+
+    result["hours_per_week"] = _coerce_number(data.get("hours_per_week"))
+    result["timeline_weeks"] = _coerce_number(data.get("timeline_weeks"))
+
+    return result
+
+
+def merge_profile(base: Dict[str, Any], delta: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(base or {})
+    for key, value in (delta or {}).items():
+        if key == "schema_version":
+            continue
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        if isinstance(value, list):
+            if not value:
+                continue
+            existing = merged.get(key)
+            if not isinstance(existing, list):
+                existing = []
+            merged[key] = list(dict.fromkeys(existing + value))
+            continue
+        # Keep latest non-empty scalar by default.
+        merged[key] = value
+    return merged

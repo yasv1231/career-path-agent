@@ -38,6 +38,13 @@ def _load_env_file() -> None:
 
 _load_env_file()
 
+try:
+    import sys
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 from workflow.runner import run_message_flow
 
 

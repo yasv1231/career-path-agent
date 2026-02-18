@@ -1,6 +1,6 @@
 """
 Lightweight fallback implementation for StateGraph used by the
-workflow modules (e.g., workflow/graph_chat.py, workflow/graph_career.py).
+workflow modules (e.g., workflow/graph_chat.py).
 This implements the minimal API the workflow expects: node registration,
 edges, a simple conditional edge, compile (no-op) and invoke to run the graph.
 """
@@ -23,9 +23,10 @@ class StateGraph:
     def add_edge(self, src, dst):
         self.edges.setdefault(src, []).append(dst)
 
-    def add_conditional_edges(self, node, func):
-        # func: state -> next_node_or_END
-        self.conditional = (node, func)
+    def add_conditional_edges(self, node, func, path_map=None):
+        # func: state -> next_key_or_node_or_END
+        # path_map: optional mapping from key -> node name
+        self.conditional = (node, func, path_map)
 
     def compile(self):
         return self
@@ -44,7 +45,12 @@ class StateGraph:
                 st.update(out)
 
             if self.conditional and current == self.conditional[0]:
-                nxt = self.conditional[1](st)
+                _, cond_fn, path_map = self.conditional
+                result = cond_fn(st)
+                if path_map and isinstance(path_map, dict):
+                    nxt = path_map.get(result, result)
+                else:
+                    nxt = result
             else:
                 nxts = self.edges.get(current, [])
                 nxt = nxts[0] if nxts else None

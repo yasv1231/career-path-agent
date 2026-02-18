@@ -4,3 +4,5 @@
 __pycache__/
 *.pyc
 .env
+data/rag_chroma/
+data/reference_rag_db/

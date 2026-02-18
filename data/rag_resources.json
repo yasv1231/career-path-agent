@@ -1,0 +1,79 @@
+{
+  "career_aliases": {
+    "data analyst": [
+      "data analyst",
+      "da",
+      "business analyst",
+      "bi analyst",
+      "analytics analyst",
+      "reporting analyst"
+    ],
+    "data scientist": [
+      "data scientist",
+      "ds",
+      "applied scientist",
+      "research scientist"
+    ],
+    "ml engineer": [
+      "ml engineer",
+      "machine learning engineer",
+      "ml ops",
+      "mlops engineer",
+      "ml",
+      "machine learning"
+    ],
+    "software engineer": [
+      "software engineer",
+      "software developer",
+      "backend engineer",
+      "frontend engineer",
+      "full stack engineer",
+      "developer",
+      "swe"
+    ]
+  },
+  "confidence_thresholds": {
+    "low": 0.08,
+    "mid": 0.14
+  },
+  "vector_store": {
+    "db_dir": "data/rag_chroma",
+    "collection_name": "career_knowledge",
+    "embedding_model": "shibing624/text2vec-base-chinese",
+    "reranker_model": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+    "enable_rerank": false
+  },
+  "context_format": {
+    "context_prefix": "RAG_CONTEXT:",
+    "citations_label": "Citations"
+  },
+  "sections": [
+    {
+      "name": "job_profile",
+      "label": "Job Profile",
+      "doc_type": "job_profile",
+      "query_hint": "role responsibilities overview",
+      "top_k": 2,
+      "item_text_key": "text",
+      "clarify_message": "Please confirm the exact role title or provide more profile details."
+    },
+    {
+      "name": "competency",
+      "label": "Competency Model",
+      "doc_type": "competency",
+      "query_hint": "competency model skills behaviors",
+      "top_k": 2,
+      "item_text_key": "text",
+      "clarify_message": "Low confidence. Confirm the target role or choose a close alternative."
+    },
+    {
+      "name": "resource",
+      "label": "Resources",
+      "doc_type": "resource",
+      "query_hint": "courses projects resources",
+      "top_k": 6,
+      "item_text_key": "notes",
+      "clarify_message": "Low confidence. Share preferred domain or platform to narrow resources."
+    }
+  ]
+}

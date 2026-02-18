@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any, Dict, List
 
 from rag_agent import RagAgent, CAREER_ALIASES, _normalize_career
@@ -24,41 +25,53 @@ def _infer_career_from_text(text: str) -> str:
     return _normalize_career(lowered)
 
 
-def build_rag_context(career: str, rag_agent: RagAgent) -> Dict[str, Any]:
-    job = rag_agent.job_confirmation(career)
-    competency = rag_agent.competency_model(career)
-    resources = rag_agent.resource_retrieval(career)
+@lru_cache(maxsize=1)
+def _get_rag_agent() -> RagAgent:
+    return RagAgent()
 
+
+def build_rag_context(
+    career: str,
+    rag_agent: RagAgent,
+    rag_filters: Dict[str, Any] | None = None,
+    query_hints: List[str] | None = None,
+) -> Dict[str, Any]:
     lines: List[str] = []
     citations: List[str] = []
 
-    if job.get("items"):
-        lines.append("Job Profile:")
-        for item in job.get("items", []):
-            lines.append(f"- {item.get('title','')}: {item.get('text','')}")
-        citations.extend([c.get("ref", "") for c in job.get("citations", []) if c.get("ref")])
+    for section in rag_agent.retrieve_sections(
+        career,
+        rag_filters=rag_filters or {},
+        query_hints=query_hints or [],
+    ):
+        result = section.get("result", {})
+        items = result.get("items", [])
+        if not items:
+            continue
 
-    if competency.get("items"):
-        lines.append("Competency Model:")
-        for item in competency.get("items", []):
-            lines.append(f"- {item.get('title','')}: {item.get('text','')}")
-        citations.extend([c.get("ref", "") for c in competency.get("citations", []) if c.get("ref")])
+        label = section.get("label", section.get("name", "Knowledge"))
+        item_text_key = section.get("item_text_key", "text")
+        lines.append(f"{label}:")
+        for item in items:
+            text = item.get(item_text_key, "")
+            suffix = f" ({item.get('url')})" if item.get("url") else ""
+            lines.append(f"- {item.get('title', '')}: {text}{suffix}")
 
-    if resources.get("items"):
-        lines.append("Resources:")
-        for item in resources.get("items", []):
-            lines.append(f"- {item.get('title','')}: {item.get('notes','')}")
-        for item in resources.get("items", []):
-            for citation in item.get("citations", []):
-                ref = citation.get("ref", "")
-                if ref:
-                    citations.append(ref)
+        for citation in result.get("citations", []):
+            ref = citation.get("ref", "")
+            if ref:
+                citations.append(ref)
 
     context = "\n".join(lines).strip()
     return {"context": context, "citations": citations}
 
 
-def maybe_attach_rag_context(messages: List[Any], route: str) -> Dict[str, Any]:
+def maybe_attach_rag_context(
+    messages: List[Any],
+    route: str,
+    rag_filters: Dict[str, Any] | None = None,
+    query_hints: List[str] | None = None,
+) -> Dict[str, Any]:
     if route != "rag":
         return {"messages": messages, "rag_context": ""}
 
@@ -66,19 +79,28 @@ def maybe_attach_rag_context(messages: List[Any], route: str) -> Dict[str, Any]:
         item.get("content", "") for item in serialize_messages_openai(messages) if item.get("role") == "user"
     )
     career = _infer_career_from_text(text)
-    rag_agent = RagAgent()
-    payload = build_rag_context(career, rag_agent)
+    rag_agent = _get_rag_agent()
+    payload = build_rag_context(
+        career,
+        rag_agent,
+        rag_filters=rag_filters or {},
+        query_hints=query_hints or [],
+    )
 
     if not payload["context"]:
         return {"messages": messages, "rag_context": ""}
 
+    context_format = rag_agent.get_context_format()
     rag_text = payload["context"]
     if payload["citations"]:
-        rag_text = f"{rag_text}\nCitations: {', '.join(payload['citations'])}"
+        citations_label = context_format.get("citations_label", "Citations")
+        rag_text = f"{rag_text}\n{citations_label}: {', '.join(payload['citations'])}"
+
+    context_prefix = context_format.get("context_prefix", "RAG_CONTEXT:")
 
     if HAS_LANGCHAIN_MESSAGES and SystemMessage:
-        messages = [SystemMessage(content=f"RAG_CONTEXT:\n{rag_text}")] + list(messages)
+        messages = [SystemMessage(content=f"{context_prefix}\n{rag_text}")] + list(messages)
     else:
-        messages = [{"role": "system", "content": f"RAG_CONTEXT:\n{rag_text}"}] + list(messages)
+        messages = [{"role": "system", "content": f"{context_prefix}\n{rag_text}"}] + list(messages)
 
     return {"messages": messages, "rag_context": rag_text}
