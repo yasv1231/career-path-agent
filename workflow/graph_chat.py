@@ -1,13 +1,13 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 from langsmith_integration import configure_langsmith, get_chat_model, get_default_logger
 from .evaluator import evaluate_profile
-from .extractor import coerce_profile_v1, default_profile, merge_profile, try_parse_json
+from .extractor import default_profile, merge_profile, try_parse_json
 from .goal_constraints import (
     build_rag_filters,
     default_goal_constraints,
@@ -19,7 +19,7 @@ from .mcp import get_mcp_servers
 from .messages import is_openai_message, normalize_messages, serialize_messages_openai
 from .rag import maybe_attach_rag_context
 from .routing import route_to_state
-from .state import ChatConversationState, PROFILE_REQUIRED_FIELDS, PROFILE_SCHEMA_V1
+from .state import ChatConversationState, PROFILE_REQUIRED_FIELDS, ProgressState, UserState
 
 try:
     from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -33,7 +33,6 @@ except Exception:
     HAS_LANGCHAIN_MESSAGES = False
 
 logger = get_default_logger()
-
 
 QUESTION_MAP: Dict[str, str] = {
     "education": "What is your education background and major?",
@@ -49,21 +48,106 @@ QUESTION_MAP: Dict[str, str] = {
     "goals": "What measurable goal do you want to achieve first?",
 }
 
-BASIC_QUESTION_FIELDS: List[str] = [
-    "education",
-    "skills",
-    "interests",
-    "experience_level",
-    "location",
-    "hours_per_week",
-    "timeline_weeks",
-    "target_role",
-]
+SLOT_LABEL_MAP: Dict[str, str] = {
+    "education": "education background",
+    "skills": "core skills",
+    "interests": "interest domains",
+    "hours_per_week": "weekly available hours",
+    "experience_level": "experience level",
+    "location": "target location",
+    "timeline_weeks": "transition timeline (weeks)",
+    "target_role": "target role",
+    "industry": "preferred industry",
+    "constraints": "constraints",
+    "goals": "primary goals",
+}
+
+LIST_SLOTS = {"skills", "interests", "constraints", "goals"}
+NUMBER_SLOTS = {"hours_per_week", "timeline_weeks"}
+REQUIRED_SLOT_ORDER = list(PROFILE_REQUIRED_FIELDS)
+OPTIONAL_SLOT_ORDER = ["target_role", "constraints", "goals", "industry"]
+
+YES_WORDS = {"yes", "y", "correct", "right", "sure", "ok", "okay", "对", "是", "没错", "正确", "好", "可以"}
+NO_WORDS = {"no", "n", "wrong", "not", "nope", "不", "不是", "不对", "错", "否"}
+UNCERTAIN_WORDS = {"not sure", "unsure", "unknown", "n/a", "idk", "不知道", "不确定", "暂时没有", "随便"}
 
 
 def build_message_graph(enable_memory: bool = True):
     langsmith_status = configure_langsmith("message-flow")
     llm = get_chat_model()
+
+    def _default_user_state() -> UserState:
+        return {
+            "profile": default_profile(),
+            "goal_constraints": default_goal_constraints(),
+            "strategy_tags": [],
+            "rag_filters": {},
+            "extracted": {},
+            "turn_index": 0,
+        }
+
+    def _default_progress_state() -> ProgressState:
+        required_slots = list(REQUIRED_SLOT_ORDER)
+        return {
+            "question_stage": "collecting",
+            "asked_questions": [],
+            "attempts": {},
+            "required_slots": required_slots,
+            "optional_slots": list(OPTIONAL_SLOT_ORDER),
+            "pending_slots": required_slots,
+            "current_slot": required_slots[0] if required_slots else "",
+            "current_slot_retries": 0,
+            "max_slot_retries": 2,
+            "awaiting_confirmation": False,
+            "candidate_slot": "",
+            "candidate_value": None,
+            "candidate_confidence": 0.0,
+            "candidate_source": "",
+            "question_phase_complete": False,
+            "plan_ready": False,
+            "last_node": "",
+        }
+
+    def _get_user_state(state: ChatConversationState) -> UserState:
+        user_state = state.get("user_state")
+        if isinstance(user_state, dict):
+            merged = _default_user_state()
+            merged.update(user_state)
+            return merged
+        return {
+            "profile": state.get("memory") or default_profile(),
+            "goal_constraints": state.get("goal_constraints") or default_goal_constraints(),
+            "strategy_tags": list(state.get("strategy_tags", [])),
+            "rag_filters": dict(state.get("rag_filters", {})),
+            "extracted": dict(state.get("extracted", {})),
+            "turn_index": 0,
+        }
+
+    def _get_progress_state(state: ChatConversationState) -> ProgressState:
+        progress_state = state.get("progress_state")
+        if isinstance(progress_state, dict):
+            merged = _default_progress_state()
+            merged.update(progress_state)
+            if not merged.get("required_slots"):
+                merged["required_slots"] = list(REQUIRED_SLOT_ORDER)
+            if not merged.get("optional_slots"):
+                merged["optional_slots"] = list(OPTIONAL_SLOT_ORDER)
+            return merged
+        merged = _default_progress_state()
+        merged["asked_questions"] = list(state.get("asked_questions", []))
+        merged["attempts"] = dict(state.get("attempts", {}))
+        merged["question_stage"] = str(state.get("question_stage", "collecting"))
+        merged["question_phase_complete"] = bool(state.get("question_phase_complete", False))
+        return merged
+
+    def _is_empty(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return not value.strip()
+        if isinstance(value, list):
+            return len(value) == 0
+        return False
 
     def _last_user_content(messages: List[Any]) -> str:
         for msg in reversed(messages):
@@ -88,8 +172,7 @@ def build_message_graph(enable_memory: bool = True):
                 response = llm.invoke(messages)
             else:
                 prompt = "\n".join(
-                    f"{item.get('role', 'user')}: {item.get('content', '')}"
-                    for item in serialize_messages_openai(messages)
+                    f"{item.get('role', 'user')}: {item.get('content', '')}" for item in serialize_messages_openai(messages)
                 )
                 response = llm.invoke(prompt)
             return getattr(response, "content", None) or str(response)
@@ -100,218 +183,236 @@ def build_message_graph(enable_memory: bool = True):
                 pass
             return ""
 
-    def _prune_profile(update: Dict[str, Any]) -> Dict[str, Any]:
-        pruned: Dict[str, Any] = {}
-        for key, value in update.items():
-            if key == "schema_version":
-                continue
-            if isinstance(value, list) and value:
-                pruned[key] = value
-            elif isinstance(value, str) and value.strip():
-                pruned[key] = value.strip()
-            elif isinstance(value, (int, float)) and value is not None:
-                pruned[key] = value
-            elif value is not None and value != "":
-                pruned[key] = value
-        return pruned
+    def _missing_fields(profile: Dict[str, Any], required_slots: List[str]) -> List[str]:
+        return [field for field in required_slots if _is_empty(profile.get(field))]
 
-    def _missing_fields(profile: Dict[str, Any]) -> List[str]:
-        missing: List[str] = []
-        for field in PROFILE_REQUIRED_FIELDS:
-            value = profile.get(field)
-            if value is None:
-                missing.append(field)
-            elif isinstance(value, list) and not value:
-                missing.append(field)
-            elif isinstance(value, str) and not value.strip():
-                missing.append(field)
-        return missing
+    def _sync_pending_slots(profile: Dict[str, Any], required_slots: List[str], pending_slots: List[str]) -> List[str]:
+        pending: List[str] = []
+        for slot in pending_slots:
+            if slot in required_slots and _is_empty(profile.get(slot)):
+                pending.append(slot)
+        for slot in required_slots:
+            if slot not in pending and _is_empty(profile.get(slot)):
+                pending.append(slot)
+        return pending
 
-    def _missing_basic_fields(profile: Dict[str, Any]) -> List[str]:
-        missing: List[str] = []
-        for field in BASIC_QUESTION_FIELDS:
-            value = profile.get(field)
-            if value is None:
-                missing.append(field)
-            elif isinstance(value, list) and not value:
-                missing.append(field)
-            elif isinstance(value, str) and not value.strip():
-                missing.append(field)
-        return missing
+    def _all_pending_exhausted(pending_slots: List[str], attempts: Dict[str, int], max_slot_retries: int) -> bool:
+        return bool(pending_slots) and all(int(attempts.get(slot, 0)) >= max_slot_retries for slot in pending_slots)
 
-    def _has_askable_missing(missing: List[str], attempts: Dict[str, int]) -> bool:
-        return any(attempts.get(field, 0) < 2 for field in missing)
+    def _split_to_list(raw: str) -> List[str]:
+        normalized = raw.replace("，", ",").replace("；", ",").replace("、", ",")
+        parts = [part.strip() for part in re.split(r"[,/\n;|]+", normalized) if part.strip()]
+        unique: List[str] = []
+        for part in parts:
+            if part not in unique:
+                unique.append(part)
+        return unique
 
-    def _is_empty(value: Any) -> bool:
+    def _extract_hours_per_week(text: str) -> float | None:
+        patterns = [
+            re.compile(r"(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\s*(?:per|a)?\s*week", re.IGNORECASE),
+            re.compile(r"每周(?:可投入|投入|学习)?\s*(\d+(?:\.\d+)?)\s*(?:小时|h)"),
+        ]
+        for pattern in patterns:
+            match = pattern.search(text)
+            if match:
+                try:
+                    return float(match.group(1))
+                except Exception:
+                    pass
+        if re.fullmatch(r"\d+(?:\.\d+)?", text.strip()):
+            return float(text.strip())
+        return None
+
+    def _extract_timeline_weeks(text: str) -> float | None:
+        lowered = text.lower().strip()
+        week_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:weeks?|wks?|week|周|星期)", lowered, re.IGNORECASE)
+        if week_match:
+            return float(week_match.group(1))
+        month_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:months?|month|个月|月)", lowered, re.IGNORECASE)
+        if month_match:
+            return float(month_match.group(1)) * 4.345
+        year_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:years?|year|年)", lowered, re.IGNORECASE)
+        if year_match:
+            return float(year_match.group(1)) * 52.0
+        if re.fullmatch(r"\d+(?:\.\d+)?", lowered):
+            return float(lowered)
+        return None
+
+    def _normalize_slot_value(slot: str, value: Any) -> Any:
         if value is None:
-            return True
-        if isinstance(value, str):
-            return not value.strip()
-        if isinstance(value, list):
-            return len(value) == 0
-        return False
+            return [] if slot in LIST_SLOTS else None
+        if slot in LIST_SLOTS:
+            if isinstance(value, list):
+                items = [str(item).strip() for item in value if str(item).strip()]
+            else:
+                items = _split_to_list(str(value))
+            return items
+        if slot in NUMBER_SLOTS:
+            try:
+                return float(value)
+            except Exception:
+                return None
+        return re.sub(r"\s+", " ", str(value)).strip()
 
-    def _extract_competency_gaps(rag_context: str, skills: List[str]) -> List[str]:
-        if not rag_context:
-            return []
-        skill_set = {str(skill).strip().lower() for skill in skills if str(skill).strip()}
-        if not skill_set:
-            return []
+    def _has_uncertain_signal(text: str) -> bool:
+        lowered = text.lower()
+        return any(marker in lowered for marker in UNCERTAIN_WORDS)
 
-        competency_terms: List[str] = []
-        in_competency = False
-        for raw_line in rag_context.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            if line.lower().startswith("competency model"):
-                in_competency = True
-                continue
-            if in_competency and line.endswith(":") and not line.startswith("-"):
-                break
-            if in_competency and line.startswith("-"):
-                text = line[1:].strip()
-                if ":" in text:
-                    text = text.split(":", 1)[1].strip()
-                parts = re.split(r",|;|/|\band\b", text)
-                for part in parts:
-                    token = re.sub(r"\s+", " ", part.strip().lower())
-                    if 3 <= len(token) <= 48:
-                        competency_terms.append(token)
+    def _extract_rule_slot(slot: str, text: str) -> Dict[str, Any]:
+        raw = (text or "").strip()
+        if not raw:
+            return {"slot": slot, "value": None, "confidence": 0.0, "source": "none"}
+        if _has_uncertain_signal(raw):
+            return {"slot": slot, "value": None, "confidence": 0.2, "source": "rule"}
 
-        gaps: List[str] = []
-        seen = set()
-        for token in competency_terms:
-            if token in seen:
-                continue
-            seen.add(token)
-            if not any(token in skill or skill in token for skill in skill_set):
-                gaps.append(token)
-        return gaps[:5]
+        lowered = raw.lower()
+        if slot == "hours_per_week":
+            value = _extract_hours_per_week(raw)
+            return {"slot": slot, "value": value, "confidence": 0.98 if value is not None else 0.2, "source": "rule"}
 
-    def _build_basic_questions(
-        missing: List[str],
-        asked_questions: List[str],
-        attempts: Dict[str, int],
-    ) -> Tuple[str, List[str], Dict[str, int]]:
-        questions: List[str] = []
-        asked_now: List[str] = []
-        attempts_next = dict(attempts)
-        for field in missing:
-            if attempts_next.get(field, 0) >= 2:
-                continue
-            question = QUESTION_MAP.get(field)
-            if question and question not in asked_questions:
-                questions.append(question)
-                asked_now.append(question)
-                attempts_next[field] = attempts_next.get(field, 0) + 1
-            if len(questions) >= 2:
-                break
+        if slot == "timeline_weeks":
+            value = _extract_timeline_weeks(raw)
+            return {"slot": slot, "value": value, "confidence": 0.98 if value is not None else 0.2, "source": "rule"}
 
-        if not questions:
-            return "", [], attempts_next
-        formatted = "\n".join(f"{idx + 1}. {question}" for idx, question in enumerate(questions))
-        return "Before planning, please clarify:\n" + formatted, asked_now, attempts_next
+        if slot == "experience_level":
+            level_map = {
+                "entry": ["entry", "new grad", "beginner", "入门", "应届"],
+                "junior": ["junior", "初级", "1-2 years", "1 year", "2 years"],
+                "mid": ["mid", "intermediate", "中级", "3 years", "4 years", "5 years"],
+                "senior": ["senior", "lead", "expert", "高级", "资深", "10 years"],
+            }
+            for level, aliases in level_map.items():
+                if any(alias in lowered for alias in aliases):
+                    return {"slot": slot, "value": level, "confidence": 0.96, "source": "rule"}
+            if len(raw.split()) <= 4:
+                return {"slot": slot, "value": raw, "confidence": 0.75, "source": "rule"}
+            return {"slot": slot, "value": None, "confidence": 0.25, "source": "rule"}
 
-    def _build_deep_questions(
-        profile: Dict[str, Any],
-        attempts: Dict[str, int],
-        asked_questions: List[str],
-        rag_context: str,
-    ) -> Tuple[str, List[str], Dict[str, int]]:
-        prompts: List[Tuple[str, str, int]] = []
-        if _is_empty(profile.get("target_role")):
-            prompts.append(
-                (
-                    "deep:target_role",
-                    "Confirm your target role (1-2 options).",
-                    2,
-                )
-            )
-        if _is_empty(profile.get("goals")):
-            prompts.append(
-                (
-                    "deep:goals",
-                    "Provide one measurable goal (for example: complete 2 portfolio projects in 8 weeks).",
-                    2,
-                )
-            )
-        if _is_empty(profile.get("constraints")):
-            prompts.append(
-                (
-                    "deep:constraints",
-                    "List your top constraints (time/budget/location/language), ordered by priority.",
-                    2,
-                )
-            )
+        if slot in LIST_SLOTS:
+            values = _split_to_list(raw)
+            return {"slot": slot, "value": values if values else None, "confidence": 0.95 if values else 0.2, "source": "rule"}
 
-        gaps = _extract_competency_gaps(rag_context, profile.get("skills", []))
-        if gaps:
-            prompts.append(
-                (
-                    "deep:competency_gap",
-                    f"Which gap should be prioritized first: {' / '.join(gaps[:3])} ?",
-                    1,
-                )
-            )
+        if slot == "location":
+            if len(raw) <= 40:
+                return {"slot": slot, "value": raw, "confidence": 0.9, "source": "rule"}
+            return {"slot": slot, "value": None, "confidence": 0.3, "source": "rule"}
 
-        picked: List[str] = []
-        asked_now: List[str] = []
-        attempts_next = dict(attempts)
-        for key, question, limit in prompts:
-            if attempts_next.get(key, 0) >= limit:
-                continue
-            if question in asked_questions:
-                continue
-            picked.append(question)
-            asked_now.append(question)
-            attempts_next[key] = attempts_next.get(key, 0) + 1
-            if len(picked) >= 2:
-                break
+        if slot == "education":
+            markers = ["bachelor", "master", "phd", "degree", "本科", "硕士", "博士", "大专", "学历"]
+            if any(marker in lowered for marker in markers):
+                return {"slot": slot, "value": raw, "confidence": 0.94, "source": "rule"}
+            if len(raw) <= 80:
+                return {"slot": slot, "value": raw, "confidence": 0.72, "source": "rule"}
+            return {"slot": slot, "value": None, "confidence": 0.3, "source": "rule"}
 
-        if not picked:
-            return "", [], attempts_next
-        return (
-            "Before the final one-shot plan, I need two more details:\n"
-            + "\n".join(f"{idx + 1}. {question}" for idx, question in enumerate(picked)),
-            asked_now,
-            attempts_next,
+        if len(raw) <= 100:
+            return {"slot": slot, "value": raw, "confidence": 0.75, "source": "rule"}
+        return {"slot": slot, "value": None, "confidence": 0.3, "source": "rule"}
+
+    def _extract_llm_slot(slot: str, text: str) -> Dict[str, Any]:
+        if not llm:
+            return {"slot": slot, "value": None, "confidence": 0.0, "source": "none"}
+
+        instruction = (
+            "Extract one slot from user text and return strict JSON only: "
+            '{"slot":"<slot>","value":<string|number|array|null>,"confidence":<0-1>}'
         )
+        prompt = (
+            f"slot={slot}\n"
+            f"user_text={text}\n"
+            "Rules:\n"
+            "1) Keep only value for this slot.\n"
+            "2) If unclear, set value=null and confidence <= 0.4.\n"
+            "3) confidence must be numeric between 0 and 1."
+        )
+        try:
+            if HAS_LANGCHAIN_MESSAGES and SystemMessage and HumanMessage:
+                response = llm.invoke([SystemMessage(content=instruction), HumanMessage(content=prompt)])
+            else:
+                response = llm.invoke(instruction + "\n\n" + prompt)
+            raw = getattr(response, "content", None) or str(response)
+            data = try_parse_json(raw)
+        except Exception as exc:
+            try:
+                logger.log_event("llm_slot_extract_error", {"slot": slot, "error": str(exc)})
+            except Exception:
+                pass
+            data = None
 
-    def _has_targeted_question(
-        profile: Dict[str, Any],
-        attempts: Dict[str, int],
-        asked_questions: List[str],
-        rag_context: str,
-    ) -> bool:
-        question, _, _ = _build_deep_questions(profile, attempts, asked_questions, rag_context)
-        return bool(question.strip())
+        if not isinstance(data, dict):
+            return {"slot": slot, "value": None, "confidence": 0.0, "source": "none"}
 
-    def _needs_deep_dive(profile: Dict[str, Any], attempts: Dict[str, int], rag_context: str) -> bool:
-        deep_fields = ("target_role", "goals", "constraints")
-        for field in deep_fields:
-            if _is_empty(profile.get(field)) and attempts.get(f"deep:{field}", 0) < 2:
-                return True
-        gaps = _extract_competency_gaps(rag_context, profile.get("skills", []))
-        if gaps and attempts.get("deep:competency_gap", 0) < 1:
-            return True
-        return False
+        value = _normalize_slot_value(slot, data.get("value"))
+        confidence = data.get("confidence", 0.0)
+        if not isinstance(confidence, (int, float)):
+            confidence = 0.0
+        confidence = max(0.0, min(1.0, float(confidence)))
+        return {"slot": slot, "value": value, "confidence": confidence, "source": "llm"}
 
-    def _plan_prompt(
-        memory: Dict[str, Any],
-        goal_constraints: Dict[str, Any],
-        strategy_tags: List[str],
-        last_user: str,
-        rag_context: str,
-    ) -> List[Any]:
+    def _classify_confidence(source: str, confidence: float) -> str:
+        if source == "rule" and confidence > 0:
+            return "high"
+        if confidence >= 0.9:
+            return "high"
+        if confidence >= 0.6:
+            return "medium"
+        return "low"
+
+    def _extract_slot_with_confidence(slot: str, text: str) -> Dict[str, Any]:
+        rule_result = _extract_rule_slot(slot, text)
+        rule_value = _normalize_slot_value(slot, rule_result.get("value"))
+        rule_conf = float(rule_result.get("confidence", 0.0) or 0.0)
+        if not _is_empty(rule_value) and rule_conf >= 0.9:
+            return {"slot": slot, "value": rule_value, "confidence": rule_conf, "source": "rule", "status": "high"}
+
+        llm_result = _extract_llm_slot(slot, text)
+        llm_value = _normalize_slot_value(slot, llm_result.get("value"))
+        llm_conf = float(llm_result.get("confidence", 0.0) or 0.0)
+        llm_status = _classify_confidence("llm", llm_conf)
+        if not _is_empty(llm_value):
+            return {"slot": slot, "value": llm_value, "confidence": llm_conf, "source": "llm", "status": llm_status}
+
+        return {
+            "slot": slot,
+            "value": rule_value,
+            "confidence": rule_conf if not _is_empty(rule_value) else max(rule_conf, llm_conf),
+            "source": "rule" if not _is_empty(rule_value) else "none",
+            "status": _classify_confidence("rule", rule_conf) if not _is_empty(rule_value) else "low",
+        }
+
+    def _parse_confirmation(text: str) -> str:
+        normalized = re.sub(r"[^\w\u4e00-\u9fff]+", " ", (text or "").lower()).strip()
+        if not normalized:
+            return "unknown"
+        tokens = normalized.split()
+        if any(token in YES_WORDS for token in tokens) or normalized in YES_WORDS:
+            return "yes"
+        if any(token in NO_WORDS for token in tokens) or normalized in NO_WORDS:
+            return "no"
+        if any(marker in normalized for marker in ("是的", "对的", "没问题")):
+            return "yes"
+        if any(marker in normalized for marker in ("不是", "不对", "不准确")):
+            return "no"
+        return "unknown"
+
+    def _build_slot_question(slot: str, retries: int) -> str:
+        base = QUESTION_MAP.get(slot, f"Please provide your {slot}.")
+        if retries <= 0:
+            return base
+        return base + "\nPlease answer in one short sentence or comma-separated list so I can capture it precisely."
+
+    def _build_confirmation_question(slot: str, value: Any, confidence: float) -> str:
+        shown = ", ".join(str(item) for item in value) if isinstance(value, list) else str(value)
+        label = SLOT_LABEL_MAP.get(slot, slot)
+        return f"I extracted your {label} as: {shown}. Please confirm yes/no (confidence {confidence:.2f})."
+
+    def _plan_prompt(memory: Dict[str, Any], goal_constraints: Dict[str, Any], strategy_tags: List[str], last_user: str, rag_context: str) -> List[Any]:
         memory_json = json.dumps(memory, ensure_ascii=False)
         goal_constraints_json = json.dumps(goal_constraints, ensure_ascii=False)
         strategy_tag_text = ", ".join(strategy_tags) if strategy_tags else "none"
 
-        system_text = (
-            "You are a career planning expert. Produce one final, concrete, actionable plan. "
-            "Do not ask follow-up questions in this step."
-        )
+        system_text = "You are a career planning expert. Produce one final, concrete, actionable plan. Do not ask follow-up questions in this step."
         human_text = (
             f"Latest user message:\n{last_user}\n\n"
             f"User profile (JSON):\n{memory_json}\n\n"
@@ -328,10 +429,7 @@ def build_message_graph(enable_memory: bool = True):
         )
         if HAS_LANGCHAIN_MESSAGES and SystemMessage and HumanMessage:
             return [SystemMessage(content=system_text), HumanMessage(content=human_text)]
-        return [
-            {"role": "system", "content": system_text},
-            {"role": "user", "content": human_text},
-        ]
+        return [{"role": "system", "content": system_text}, {"role": "user", "content": human_text}]
 
     def routing_node(state: ChatConversationState) -> ChatConversationState:
         messages = normalize_messages(state.get("messages", []))
@@ -340,11 +438,12 @@ def build_message_graph(enable_memory: bool = True):
     def rag_node(state: ChatConversationState) -> ChatConversationState:
         messages = normalize_messages(state.get("messages", []))
         route = state.get("route", "direct")
-        memory = state.get("memory") or {}
+        user_state = _get_user_state(state)
+        memory = user_state.get("profile") or {}
         force_rag = bool(memory.get("target_role"))
 
-        goal_constraints = state.get("goal_constraints") or default_goal_constraints()
-        rag_filters = state.get("rag_filters") or build_rag_filters(goal_constraints)
+        goal_constraints = user_state.get("goal_constraints") or default_goal_constraints()
+        rag_filters = user_state.get("rag_filters") or build_rag_filters(goal_constraints)
         query_hints = list(goal_constraints.get("query_hints", []))
         return maybe_attach_rag_context(
             messages,
@@ -357,182 +456,273 @@ def build_message_graph(enable_memory: bool = True):
         messages = normalize_messages(state.get("messages", []))
         last_user = _last_user_content(messages)
         if not last_user:
-            return {"profile_update": {}, "goal_constraints_update": {}}
+            return {"slot_extract": {}, "slot_confirmation": {}, "goal_constraints_update": {}}
 
+        progress_state = _get_progress_state(state)
         goal_constraints_update = extract_goal_constraints_from_text(last_user)
-        if not llm:
-            return {"profile_update": {}, "goal_constraints_update": goal_constraints_update}
 
-        schema_json = json.dumps(PROFILE_SCHEMA_V1, ensure_ascii=True)
-        base_system = (
-            "You are a strict JSON extraction engine. "
-            "Output JSON only with schema_version=profile_v1. "
-            "Unknown fields should be null or empty array."
-        )
-        base_prompt = f"User text:\n{last_user}\n\nSchema:\n{schema_json}"
-        attempts = 0
-        last_data: Any = None
-        while attempts < 2:
-            attempts += 1
-            try:
-                if HAS_LANGCHAIN_MESSAGES and SystemMessage and HumanMessage:
-                    response = llm.invoke(
-                        [
-                            SystemMessage(content=base_system),
-                            HumanMessage(content=base_prompt),
-                        ]
-                    )
-                else:
-                    response = llm.invoke(base_system + "\n\n" + base_prompt)
-                text = getattr(response, "content", None) or str(response)
-            except Exception as exc:
-                try:
-                    logger.log_event("llm_profile_extract_error", {"error": str(exc)})
-                except Exception:
-                    pass
-                text = ""
+        if bool(progress_state.get("awaiting_confirmation", False)):
+            decision = _parse_confirmation(last_user)
+            return {
+                "slot_extract": {},
+                "slot_confirmation": {"decision": decision},
+                "goal_constraints_update": goal_constraints_update,
+            }
 
-            data = try_parse_json(text)
-            last_data = data
-            if isinstance(data, dict):
-                break
+        pending_slots = list(progress_state.get("pending_slots", []))
+        current_slot = str(progress_state.get("current_slot", "")).strip()
+        if not current_slot and pending_slots:
+            current_slot = pending_slots[0]
+        if not current_slot:
+            return {"slot_extract": {}, "slot_confirmation": {}, "goal_constraints_update": goal_constraints_update}
 
-        update = coerce_profile_v1(last_data)
-        return {
-            "profile_update": _prune_profile(update),
-            "goal_constraints_update": goal_constraints_update,
-        }
+        slot_extract = _extract_slot_with_confidence(current_slot, last_user)
+        return {"slot_extract": slot_extract, "slot_confirmation": {}, "goal_constraints_update": goal_constraints_update}
 
     def memory_update_node(state: ChatConversationState) -> ChatConversationState:
-        memory = state.get("memory") or default_profile()
-        update = state.get("profile_update") or {}
-        merged_profile = merge_profile(memory, update)
+        user_state = _get_user_state(state)
+        progress_state = _get_progress_state(state)
 
-        goal_constraints = state.get("goal_constraints") or default_goal_constraints()
+        memory = user_state.get("profile") or default_profile()
+        required_slots = list(progress_state.get("required_slots", REQUIRED_SLOT_ORDER))
+        pending_slots = _sync_pending_slots(memory, required_slots, list(progress_state.get("pending_slots", required_slots)))
+        attempts = dict(progress_state.get("attempts", {}))
+        max_slot_retries = int(progress_state.get("max_slot_retries", 2) or 2)
+
+        current_slot = str(progress_state.get("current_slot", "")).strip()
+        if not current_slot and pending_slots:
+            current_slot = pending_slots[0]
+        current_slot_retries = int(progress_state.get("current_slot_retries", 0) or 0)
+
+        awaiting_confirmation = bool(progress_state.get("awaiting_confirmation", False))
+        candidate_slot = str(progress_state.get("candidate_slot", "")).strip()
+        candidate_value = progress_state.get("candidate_value")
+        candidate_confidence = float(progress_state.get("candidate_confidence", 0.0) or 0.0)
+        candidate_source = str(progress_state.get("candidate_source", "")).strip()
+
+        slot_confirmation = state.get("slot_confirmation") or {}
+        slot_extract = state.get("slot_extract") or {}
+        committed = False
+
+        if awaiting_confirmation:
+            decision = str(slot_confirmation.get("decision", "unknown")).strip().lower()
+            if decision == "yes" and candidate_slot and not _is_empty(candidate_value):
+                memory = merge_profile(memory, {candidate_slot: candidate_value})
+                pending_slots = _sync_pending_slots(memory, required_slots, pending_slots)
+                current_slot = pending_slots[0] if pending_slots else ""
+                current_slot_retries = 0
+                awaiting_confirmation = False
+                candidate_slot = ""
+                candidate_value = None
+                candidate_confidence = 0.0
+                candidate_source = ""
+                committed = True
+            elif decision == "no":
+                target_slot = candidate_slot or current_slot
+                if target_slot:
+                    attempts[target_slot] = int(attempts.get(target_slot, 0)) + 1
+                current_slot_retries += 1
+                awaiting_confirmation = False
+                candidate_slot = ""
+                candidate_value = None
+                candidate_confidence = 0.0
+                candidate_source = ""
+        else:
+            slot = str(slot_extract.get("slot", "")).strip()
+            status = str(slot_extract.get("status", "low")).strip().lower()
+            confidence = float(slot_extract.get("confidence", 0.0) or 0.0)
+            source = str(slot_extract.get("source", "")).strip().lower()
+            value = slot_extract.get("value")
+
+            if not slot:
+                pass
+            elif status == "high" and not _is_empty(value):
+                memory = merge_profile(memory, {slot: value})
+                pending_slots = _sync_pending_slots(memory, required_slots, pending_slots)
+                current_slot = pending_slots[0] if pending_slots else ""
+                current_slot_retries = 0
+                committed = True
+            elif status == "medium" and not _is_empty(value):
+                awaiting_confirmation = True
+                candidate_slot = slot
+                candidate_value = value
+                candidate_confidence = confidence
+                candidate_source = source
+            else:
+                attempts[slot] = int(attempts.get(slot, 0)) + 1
+                current_slot = slot
+                current_slot_retries += 1
+                if current_slot_retries >= max_slot_retries and slot in pending_slots and len(pending_slots) > 1:
+                    pending_slots = [item for item in pending_slots if item != slot] + [slot]
+                    current_slot = pending_slots[0]
+                    current_slot_retries = 0
+
+        goal_constraints = user_state.get("goal_constraints") or default_goal_constraints()
         goal_constraints_update = state.get("goal_constraints_update") or {}
         merged_goal_constraints = merge_goal_constraints(goal_constraints, goal_constraints_update)
         strategy_tags = derive_strategy_tags(merged_goal_constraints)
         rag_filters = build_rag_filters(merged_goal_constraints)
 
-        return {
-            "memory": merged_profile,
+        pending_slots = _sync_pending_slots(memory, required_slots, pending_slots)
+        missing_fields = _missing_fields(memory, required_slots)
+        if current_slot and current_slot not in pending_slots:
+            current_slot = pending_slots[0] if pending_slots else ""
+            current_slot_retries = 0
+        if not current_slot and pending_slots:
+            current_slot = pending_slots[0]
+
+        next_turn_index = int(user_state.get("turn_index", 0) or 0)
+        if committed or goal_constraints_update:
+            next_turn_index += 1
+
+        next_user_state: UserState = {
+            **user_state,
+            "profile": memory,
             "goal_constraints": merged_goal_constraints,
             "strategy_tags": strategy_tags,
             "rag_filters": rag_filters,
-            "missing_fields": _missing_fields(merged_profile),
+            "turn_index": next_turn_index,
+        }
+        next_progress_state: ProgressState = {
+            **progress_state,
+            "question_stage": "confirming" if awaiting_confirmation else "collecting",
+            "required_slots": required_slots,
+            "pending_slots": pending_slots,
+            "current_slot": current_slot,
+            "current_slot_retries": current_slot_retries,
+            "max_slot_retries": max_slot_retries,
+            "attempts": attempts,
+            "awaiting_confirmation": awaiting_confirmation,
+            "candidate_slot": candidate_slot,
+            "candidate_value": candidate_value,
+            "candidate_confidence": candidate_confidence,
+            "candidate_source": candidate_source,
+            "plan_ready": len(missing_fields) == 0 and bool(progress_state.get("question_phase_complete", False)),
+            "last_node": "memory_update",
+        }
+
+        return {
+            "user_state": next_user_state,
+            "progress_state": next_progress_state,
+            "memory": memory,
+            "goal_constraints": merged_goal_constraints,
+            "strategy_tags": strategy_tags,
+            "rag_filters": rag_filters,
+            "missing_fields": missing_fields,
+            "attempts": attempts,
+            "question_stage": next_progress_state["question_stage"],
+            "question_phase_complete": bool(next_progress_state.get("question_phase_complete", False)),
         }
 
     def evaluation_node(state: ChatConversationState) -> ChatConversationState:
-        memory = state.get("memory") or default_profile()
-        evaluation = evaluate_profile(memory, PROFILE_REQUIRED_FIELDS)
-        missing = evaluation.get("missing_fields", [])
+        user_state = _get_user_state(state)
+        progress_state = _get_progress_state(state)
+        profile = user_state.get("profile") or default_profile()
+        required_slots = list(progress_state.get("required_slots", REQUIRED_SLOT_ORDER))
+        evaluation = evaluate_profile(profile, required_slots)
+
+        pending_slots = _sync_pending_slots(profile, required_slots, list(progress_state.get("pending_slots", required_slots)))
+        current_slot = str(progress_state.get("current_slot", "")).strip()
+        if not current_slot and pending_slots:
+            current_slot = pending_slots[0]
+        if current_slot and current_slot not in pending_slots:
+            current_slot = pending_slots[0] if pending_slots else ""
+
+        next_progress_state: ProgressState = {
+            **progress_state,
+            "pending_slots": pending_slots,
+            "current_slot": current_slot,
+            "plan_ready": len(pending_slots) == 0 and bool(progress_state.get("question_phase_complete", False)),
+            "last_node": "evaluate",
+        }
         return {
+            "progress_state": next_progress_state,
             "evaluation": evaluation,
-            "missing_fields": missing,
-            "conversation_complete": evaluation.get("valid", False),
+            "missing_fields": list(evaluation.get("missing_fields", [])),
+            "conversation_complete": False,
         }
 
     def decide_next_step(state: ChatConversationState) -> str:
-        profile = state.get("memory") or default_profile()
-        attempts = state.get("attempts") or {}
-        asked_questions = state.get("asked_questions") or []
-        rag_context = state.get("rag_context", "")
-        stage = str(state.get("question_stage", "basic")).strip().lower()
-        targeted_rounds = int(state.get("targeted_rounds", 0) or 0)
-        max_targeted_rounds = int(state.get("max_targeted_rounds", 2) or 2)
+        progress_state = _get_progress_state(state)
+        pending_slots = list(progress_state.get("pending_slots", []))
+        attempts = dict(progress_state.get("attempts", {}))
+        max_slot_retries = int(progress_state.get("max_slot_retries", 2) or 2)
 
-        if bool(state.get("question_phase_complete")):
+        if bool(progress_state.get("question_phase_complete", False)):
             return "plan"
-
-        missing_basic = _missing_basic_fields(profile)
-        if stage == "basic":
-            if missing_basic and _has_askable_missing(missing_basic, attempts):
-                return "ask"
-            if targeted_rounds < max_targeted_rounds and _has_targeted_question(
-                profile,
-                attempts,
-                asked_questions,
-                rag_context,
-            ):
-                return "ask"
+        if bool(progress_state.get("awaiting_confirmation", False)):
+            return "ask"
+        if not pending_slots:
             return "question_exit"
-
-        if stage == "targeted":
-            if targeted_rounds >= max_targeted_rounds:
-                return "question_exit"
-            if _has_targeted_question(profile, attempts, asked_questions, rag_context):
-                return "ask"
+        if _all_pending_exhausted(pending_slots, attempts, max_slot_retries):
             return "question_exit"
-
-        return "question_exit"
+        return "ask"
 
     def decide_node(state: ChatConversationState) -> str:
         return decide_next_step(state)
 
     def ask_node(state: ChatConversationState) -> ChatConversationState:
         messages = normalize_messages(state.get("messages", []))
-        asked_questions = state.get("asked_questions", [])
-        attempts = state.get("attempts", {})
-        memory = state.get("memory") or default_profile()
-        rag_context = state.get("rag_context", "")
-        stage = str(state.get("question_stage", "basic")).strip().lower()
-        targeted_rounds = int(state.get("targeted_rounds", 0) or 0)
-        max_targeted_rounds = int(state.get("max_targeted_rounds", 2) or 2)
+        progress_state = _get_progress_state(state)
+
+        asked_questions = list(progress_state.get("asked_questions", []))
+        pending_slots = list(progress_state.get("pending_slots", []))
+        current_slot = str(progress_state.get("current_slot", "")).strip()
+        attempts = dict(progress_state.get("attempts", {}))
+        awaiting_confirmation = bool(progress_state.get("awaiting_confirmation", False))
+        candidate_slot = str(progress_state.get("candidate_slot", "")).strip()
+        candidate_value = progress_state.get("candidate_value")
+        candidate_confidence = float(progress_state.get("candidate_confidence", 0.0) or 0.0)
 
         question = ""
-        asked_now: List[str] = []
-        attempts_next = dict(attempts)
-        next_stage = stage if stage in {"basic", "targeted"} else "basic"
-
-        if next_stage == "basic":
-            missing_basic = _missing_basic_fields(memory)
-            if missing_basic and _has_askable_missing(missing_basic, attempts_next):
-                question, asked_now, attempts_next = _build_basic_questions(
-                    missing_basic,
-                    asked_questions,
-                    attempts_next,
-                )
-                if not question:
-                    next_stage = "targeted"
-            else:
-                next_stage = "targeted"
-
-        if not question and next_stage == "targeted" and targeted_rounds < max_targeted_rounds:
-            question, asked_now, attempts_next = _build_deep_questions(
-                memory,
-                attempts_next,
-                asked_questions,
-                rag_context,
-            )
-            if question:
-                targeted_rounds += 1
+        if awaiting_confirmation and candidate_slot:
+            question = _build_confirmation_question(candidate_slot, candidate_value, candidate_confidence)
+        else:
+            if not current_slot and pending_slots:
+                current_slot = pending_slots[0]
+            if current_slot:
+                question = _build_slot_question(current_slot, int(attempts.get(current_slot, 0)))
 
         if question:
             _append_assistant(messages, question)
+            asked_questions.append(question)
+
+        next_progress_state: ProgressState = {
+            **progress_state,
+            "asked_questions": asked_questions,
+            "question_stage": "confirming" if awaiting_confirmation else "collecting",
+            "current_slot": current_slot,
+            "last_node": "ask",
+        }
         return {
             "messages": messages,
             "next_question": question,
-            "asked_questions": asked_questions + asked_now,
-            "attempts": attempts_next,
-            "question_stage": next_stage,
-            "targeted_rounds": targeted_rounds,
-            "max_targeted_rounds": max_targeted_rounds,
+            "progress_state": next_progress_state,
+            "asked_questions": asked_questions,
+            "attempts": attempts,
+            "question_stage": next_progress_state["question_stage"],
             "question_phase_complete": False,
             "conversation_complete": False,
         }
 
     def question_exit_node(state: ChatConversationState) -> ChatConversationState:
-        return {
+        progress_state = _get_progress_state(state)
+        next_progress_state: ProgressState = {
+            **progress_state,
             "question_stage": "done",
             "question_phase_complete": True,
+            "last_node": "question_exit",
         }
+        return {"progress_state": next_progress_state, "question_stage": "done", "question_phase_complete": True}
 
     def plan_node(state: ChatConversationState) -> ChatConversationState:
         messages = normalize_messages(state.get("messages", []))
+        user_state = _get_user_state(state)
+        progress_state = _get_progress_state(state)
         last_user = _last_user_content(messages)
-        memory = state.get("memory") or default_profile()
-        goal_constraints = state.get("goal_constraints") or default_goal_constraints()
-        strategy_tags = state.get("strategy_tags") or []
+        memory = user_state.get("profile") or default_profile()
+        goal_constraints = user_state.get("goal_constraints") or default_goal_constraints()
+        strategy_tags = user_state.get("strategy_tags") or []
         rag_context = state.get("rag_context", "")
 
         prompt = _plan_prompt(memory, goal_constraints, strategy_tags, last_user, rag_context)
@@ -541,11 +731,8 @@ def build_message_graph(enable_memory: bool = True):
             text = "Sorry, the model is currently unavailable and cannot generate a final plan."
 
         _append_assistant(messages, text)
-        return {
-            "messages": messages,
-            "last_answer": text,
-            "conversation_complete": True,
-        }
+        next_progress_state: ProgressState = {**progress_state, "plan_ready": True, "last_node": "plan"}
+        return {"messages": messages, "last_answer": text, "progress_state": next_progress_state, "conversation_complete": True}
 
     def memory_maintain_node(state: ChatConversationState) -> ChatConversationState:
         messages = normalize_messages(state.get("messages", []))
@@ -557,17 +744,11 @@ def build_message_graph(enable_memory: bool = True):
         if llm:
             summary_system = "Summarize the conversation briefly for memory. Output 3 bullets max."
             summary_human = "\n".join(
-                f"{msg.get('role', 'user')}: {msg.get('content', '')}"
-                for msg in serialize_messages_openai(messages)
+                f"{msg.get('role', 'user')}: {msg.get('content', '')}" for msg in serialize_messages_openai(messages)
             )
             try:
                 if HAS_LANGCHAIN_MESSAGES and SystemMessage and HumanMessage:
-                    response = llm.invoke(
-                        [
-                            SystemMessage(content=summary_system),
-                            HumanMessage(content=summary_human),
-                        ]
-                    )
+                    response = llm.invoke([SystemMessage(content=summary_system), HumanMessage(content=summary_human)])
                 else:
                     response = llm.invoke(summary_system + "\n\n" + summary_human)
                 summary_text = getattr(response, "content", None) or str(response)
@@ -591,10 +772,7 @@ def build_message_graph(enable_memory: bool = True):
             try:
                 res = fn(state)
                 try:
-                    logger.log_event(
-                        f"node_finished:{name}",
-                        {"result_keys": list(res.keys()) if isinstance(res, dict) else None},
-                    )
+                    logger.log_event(f"node_finished:{name}", {"result_keys": list(res.keys()) if isinstance(res, dict) else None})
                 except Exception:
                     pass
                 return res
@@ -630,16 +808,7 @@ def build_message_graph(enable_memory: bool = True):
     graph.add_edge("rag", "profile_extract")
     graph.add_edge("profile_extract", "memory_update")
     graph.add_edge("memory_update", "evaluate")
-
-    graph.add_conditional_edges(
-        "evaluate",
-        decide_node,
-        {
-            "ask": "ask",
-            "question_exit": "question_exit",
-            "plan": "plan",
-        },
-    )
+    graph.add_conditional_edges("evaluate", decide_node, {"ask": "ask", "question_exit": "question_exit", "plan": "plan"})
     graph.add_edge("question_exit", "plan")
 
     if enable_memory:

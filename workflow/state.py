@@ -22,9 +22,42 @@ class ConversationState(TypedDict, total=False):
     llm_enabled: bool
 
 
+class UserState(TypedDict, total=False):
+    profile: Dict[str, Any]
+    goal_constraints: Dict[str, Any]
+    strategy_tags: List[str]
+    rag_filters: Dict[str, Any]
+    extracted: Dict[str, Any]
+    turn_index: int
+
+
+class ProgressState(TypedDict, total=False):
+    question_stage: str
+    asked_questions: List[str]
+    attempts: Dict[str, int]
+    required_slots: List[str]
+    optional_slots: List[str]
+    pending_slots: List[str]
+    current_slot: str
+    current_slot_retries: int
+    max_slot_retries: int
+    awaiting_confirmation: bool
+    candidate_slot: str
+    candidate_value: Any
+    candidate_confidence: float
+    candidate_source: str
+    question_phase_complete: bool
+    plan_ready: bool
+    last_node: str
+
+
 class ChatConversationState(TypedDict, total=False):
     messages: List[Any]
     last_answer: str
+    user_state: UserState
+    progress_state: ProgressState
+    slot_extract: Dict[str, Any]
+    slot_confirmation: Dict[str, Any]
     extracted: Dict[str, Any]
     memory: Dict[str, Any]
     profile_update: Dict[str, Any]
@@ -37,8 +70,6 @@ class ChatConversationState(TypedDict, total=False):
     asked_questions: List[str]
     attempts: Dict[str, int]
     question_stage: str
-    targeted_rounds: int
-    max_targeted_rounds: int
     question_phase_complete: bool
     conversation_complete: bool
     route: str
