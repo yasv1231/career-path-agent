@@ -48,6 +48,16 @@ class ProgressState(TypedDict, total=False):
     candidate_source: str
     question_phase_complete: bool
     plan_ready: bool
+    required_slots_closed: bool
+    non_basic_questions_asked: int
+    non_basic_questions_limit: int
+    followup_budget_remaining: float
+    followup_min_ig: float
+    followup_candidate: Dict[str, Any]
+    followup_signatures_asked: List[str]
+    followup_should_stop: bool
+    followup_stop_reason: str
+    followup_last_ig: float
     last_node: str
 
 
@@ -123,42 +133,29 @@ EXTRACT_SCHEMA_V1 = {
 
 PROFILE_SCHEMA_VERSION = "profile_v1"
 PROFILE_REQUIRED_FIELDS = [
-    "education",
-    "skills",
-    "interests",
-    "hours_per_week",
-    "experience_level",
     "location",
+    "target_role",
+    "hours_per_week",
     "timeline_weeks",
 ]
 PROFILE_SCHEMA_V1 = {
     "type": "object",
     "required": [
         "schema_version",
-        "education",
-        "skills",
-        "interests",
+        "location",
         "target_role",
         "hours_per_week",
-        "experience_level",
-        "constraints",
-        "location",
         "timeline_weeks",
-        "industry",
-        "goals",
     ],
     "properties": {
         "schema_version": {"type": "string", "enum": [PROFILE_SCHEMA_VERSION]},
-        "education": {"type": ["string", "null"]},
-        "skills": {"type": "array", "items": {"type": "string"}},
-        "interests": {"type": "array", "items": {"type": "string"}},
+        "location": {"type": ["string", "null"]},
         "target_role": {"type": ["string", "null"]},
         "hours_per_week": {"type": ["number", "null"]},
-        "experience_level": {"type": ["string", "null"]},
-        "constraints": {"type": "array", "items": {"type": "string"}},
-        "location": {"type": ["string", "null"]},
         "timeline_weeks": {"type": ["number", "null"]},
-        "industry": {"type": ["string", "null"]},
-        "goals": {"type": "array", "items": {"type": "string"}},
+        "compensation_floor": {"type": ["number", "null"]},
+        "work_mode": {"type": ["string", "null"], "enum": ["remote", "hybrid", "on-site", None]},
+        "summary_notes": {"type": "array", "items": {"type": "string"}},
+        "unconfirmed_structured": {"type": "array", "items": {"type": "string"}},
     },
 }
