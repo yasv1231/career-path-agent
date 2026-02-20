@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List
 
 from .state import (
@@ -285,7 +286,9 @@ def _coerce_list(value: Any) -> List[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
     if isinstance(value, str):
-        parts = [part.strip() for part in value.replace(";", ",").split(",")]
+        normalized = value.replace(";", ",")
+        normalized = re.sub(r"(?<=\d),(?=\d)", "", normalized)
+        parts = [part.strip() for part in normalized.split(",")]
         return [part for part in parts if part]
     return []
 

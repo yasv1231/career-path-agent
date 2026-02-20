@@ -48,6 +48,19 @@ class ProgressState(TypedDict, total=False):
     candidate_source: str
     question_phase_complete: bool
     plan_ready: bool
+    required_slots_closed: bool
+    non_basic_questions_asked: int
+    non_basic_questions_limit: int
+    followup_budget_remaining: float
+    followup_min_ig: float
+    followup_candidate: Dict[str, Any]
+    followup_signatures_asked: List[str]
+    followup_should_stop: bool
+    followup_stop_reason: str
+    followup_last_ig: float
+    unconfirmed_constraint_fields: List[Dict[str, Any]]
+    prefetched_followup_questions: List[Dict[str, Any]]
+    prefetched_followup_index: int
     last_node: str
 
 
