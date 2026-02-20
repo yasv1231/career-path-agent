@@ -7,6 +7,7 @@ from .graph_chat import build_message_graph
 from .messages import serialize_messages_openai
 from .extractor import default_extracted, default_profile
 from .goal_constraints import default_goal_constraints
+from .state import PROFILE_REQUIRED_FIELDS
 
 logger = get_default_logger()
 
@@ -30,26 +31,10 @@ def run_message_flow(enable_memory: bool = True) -> None:
             "question_stage": "collecting",
             "asked_questions": [],
             "attempts": {},
-            "required_slots": [
-                "education",
-                "skills",
-                "interests",
-                "hours_per_week",
-                "experience_level",
-                "location",
-                "timeline_weeks",
-            ],
-            "optional_slots": ["target_role", "constraints", "goals", "industry"],
-            "pending_slots": [
-                "education",
-                "skills",
-                "interests",
-                "hours_per_week",
-                "experience_level",
-                "location",
-                "timeline_weeks",
-            ],
-            "current_slot": "education",
+            "required_slots": list(PROFILE_REQUIRED_FIELDS),
+            "optional_slots": ["compensation_floor", "work_mode"],
+            "pending_slots": list(PROFILE_REQUIRED_FIELDS),
+            "current_slot": PROFILE_REQUIRED_FIELDS[0] if PROFILE_REQUIRED_FIELDS else "",
             "current_slot_retries": 0,
             "max_slot_retries": 2,
             "awaiting_confirmation": False,
