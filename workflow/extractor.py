@@ -277,6 +277,12 @@ def default_profile() -> Dict[str, Any]:
         "timeline_weeks": None,
         "industry": None,
         "goals": [],
+        "preferences": {
+            "compensation_floor": {"value": None, "confidence": 0.0},
+            "work_mode": {"value": None, "confidence": 0.0},
+            "role_boundaries": {"value": None, "confidence": 0.0},
+        },
+        "locked_constraints": {},
     }
 
 
@@ -347,6 +353,23 @@ def coerce_profile_v1(data: Any) -> Dict[str, Any]:
 
     result["hours_per_week"] = _coerce_number(data.get("hours_per_week"))
     result["timeline_weeks"] = _coerce_number(data.get("timeline_weeks"))
+
+    preferences = data.get("preferences", {})
+    if isinstance(preferences, dict):
+        for key in ("compensation_floor", "work_mode", "role_boundaries"):
+            item = preferences.get(key)
+            if not isinstance(item, dict):
+                continue
+            value = item.get("value")
+            confidence = item.get("confidence", 0.0)
+            if not isinstance(confidence, (int, float)):
+                confidence = 0.0
+            confidence = max(0.0, min(1.0, float(confidence)))
+            result["preferences"][key] = {"value": value, "confidence": confidence}
+
+    locked = data.get("locked_constraints")
+    if isinstance(locked, dict):
+        result["locked_constraints"] = locked
 
     return result
 

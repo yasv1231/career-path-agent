@@ -59,6 +59,9 @@ class ProgressState(TypedDict, total=False):
     followup_stop_reason: str
     followup_last_ig: float
     unconfirmed_constraint_fields: List[Dict[str, Any]]
+    needs_confirmation: List[Dict[str, Any]]
+    asked_confirmation_fields: List[str]
+    active_confirmation_field: str
     prefetched_followup_questions: List[Dict[str, Any]]
     prefetched_followup_index: int
     last_node: str

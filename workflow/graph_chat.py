@@ -38,7 +38,7 @@ QUESTION_MAP: Dict[str, str] = {
     "education": "What is your education background and major?",
     "skills": "What are your current core skills (for example: research, communication, project coordination, Excel, Python, SQL)?",
     "interests": "Which business domains or topics are you most interested in?",
-    "hours_per_week": "How many hours per week can you invest consistently?",
+    "hours_per_week": "How many hours per week can you consistently invest in learning and transition activities?",
     "experience_level": "What is your current experience level (entry/junior/mid/senior)?",
     "location": "Which location or city are you targeting?",
     "timeline_weeks": "In how many weeks do you want to complete phase-1 transition?",
@@ -122,6 +122,9 @@ def build_message_graph(enable_memory: bool = True):
             "followup_stop_reason": "",
             "followup_last_ig": 0.0,
             "unconfirmed_constraint_fields": [],
+            "needs_confirmation": [],
+            "asked_confirmation_fields": [],
+            "active_confirmation_field": "",
             "prefetched_followup_questions": [],
             "prefetched_followup_index": 0,
             "last_node": "",
@@ -263,6 +266,10 @@ def build_message_graph(enable_memory: bool = True):
     def _extract_compensation_number(text: str) -> float | None:
         if not text:
             return None
+        lowered = text.lower()
+        salary_markers = ("compensation", "salary", "pay", "monthly", "per month", "month", "rmb", "cny", "¥", "￥", "薪资", "月薪")
+        if not any(marker in lowered for marker in salary_markers):
+            return None
         token = re.search(r"(?:rmb|cny|¥|￥)?\s*(\d[\d,]*)", text, re.IGNORECASE)
         if not token:
             return None
@@ -390,10 +397,42 @@ def build_message_graph(enable_memory: bool = True):
                 )}
         return merged
 
+    def _ensure_preferences(profile: Dict[str, Any]) -> Dict[str, Any]:
+        preferences = profile.get("preferences")
+        if not isinstance(preferences, dict):
+            preferences = {}
+        for key in ("compensation_floor", "work_mode", "role_boundaries"):
+            item = preferences.get(key)
+            if not isinstance(item, dict):
+                item = {"value": None, "confidence": 0.0}
+            if "value" not in item:
+                item["value"] = None
+            conf = item.get("confidence", 0.0)
+            if not isinstance(conf, (int, float)):
+                conf = 0.0
+            item["confidence"] = max(0.0, min(1.0, float(conf)))
+            preferences[key] = item
+        profile["preferences"] = preferences
+        return preferences
+
+    def _is_path_critical_field(field: str) -> bool:
+        return field in {"work_mode", "compensation_floor", "target_role", "industry"}
+
+    def _is_confirmed_preference(profile: Dict[str, Any], field: str) -> bool:
+        preferences = _ensure_preferences(profile)
+        item = preferences.get(field, {})
+        if not isinstance(item, dict):
+            return False
+        value = item.get("value")
+        confidence = item.get("confidence", 0.0)
+        if not isinstance(confidence, (int, float)):
+            return False
+        return value is not None and float(confidence) >= 0.6
+
     def _build_constraints_from_signals(
         signals: Dict[str, Dict[str, Any]]
-    ) -> tuple[List[str], List[Dict[str, Any]], float]:
-        committed: List[str] = []
+    ) -> tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]], float]:
+        committed_preferences: Dict[str, Dict[str, Any]] = {}
         unconfirmed: List[Dict[str, Any]] = []
         max_conf = 0.0
 
@@ -403,15 +442,10 @@ def build_message_graph(enable_memory: bool = True):
             conf = float(field.get("confidence", 0.0) or 0.0)
             max_conf = max(max_conf, conf)
             if conf >= CONSTRAINT_COMMIT_THRESHOLD and value is not None:
-                if name == "compensation_floor":
-                    committed.append(f"Compensation floor: at least RMB {int(round(float(value))):,} per month.")
-                elif name == "work_mode":
-                    committed.append(f"Work mode: {value}.")
-                elif name == "role_boundaries":
-                    committed.append(f"Role boundaries: {str(value).strip()}")
+                committed_preferences[name] = {"value": value, "confidence": conf}
             else:
                 unconfirmed.append({"field": name, "value": value, "confidence": conf})
-        return committed, unconfirmed, max_conf
+        return committed_preferences, unconfirmed, max_conf
 
     def _normalize_slot_value(slot: str, value: Any) -> Any:
         if value is None:
@@ -436,7 +470,17 @@ def build_message_graph(enable_memory: bool = True):
             return [str(item).strip() for item in value if str(item).strip()]
         return _split_to_list(str(value))
 
-    def _extract_compensation_text(constraints: List[str]) -> str:
+    def _extract_compensation_text(profile: Dict[str, Any]) -> str:
+        preferences = _ensure_preferences(profile)
+        comp_item = preferences.get("compensation_floor", {})
+        comp_value = comp_item.get("value")
+        comp_conf = float(comp_item.get("confidence", 0.0) or 0.0)
+        if comp_value is not None and comp_conf >= 0.6:
+            try:
+                return f"Compensation floor: at least RMB {int(round(float(comp_value))):,} per month"
+            except Exception:
+                pass
+        constraints = _as_text_list(profile.get("constraints"))
         pattern = re.compile(r"(?:rmb|cny|¥|￥)?\s*\d[\d,]*", re.IGNORECASE)
         for item in constraints:
             lowered = item.lower()
@@ -457,11 +501,19 @@ def build_message_graph(enable_memory: bool = True):
         return "Compensation floor"
 
     def _constraint_component_status(profile: Dict[str, Any]) -> Dict[str, bool]:
+        preferences = _ensure_preferences(profile)
         constraints = _as_text_list(profile.get("constraints"))
         joined = " ".join(constraints).lower()
-        has_comp = bool(re.search(r"(compensation|salary|pay|rmb|cny|¥|￥).*\d|\d.*(per month|monthly|月)", joined))
-        has_work_mode = any(token in joined for token in ("remote", "hybrid", "on-site", "onsite", "work mode"))
-        has_role_boundary = any(
+        pref_comp = preferences.get("compensation_floor", {})
+        pref_work = preferences.get("work_mode", {})
+        pref_boundary = preferences.get("role_boundaries", {})
+        has_comp = (pref_comp.get("value") is not None and float(pref_comp.get("confidence", 0.0) or 0.0) >= 0.6) or bool(
+            re.search(r"(compensation|salary|pay|rmb|cny|¥|￥).*\d|\d.*(per month|monthly|月)", joined)
+        )
+        has_work_mode = (pref_work.get("value") is not None and float(pref_work.get("confidence", 0.0) or 0.0) >= 0.6) or any(
+            token in joined for token in ("remote", "hybrid", "on-site", "onsite", "work mode")
+        )
+        has_role_boundary = (pref_boundary.get("value") is not None and float(pref_boundary.get("confidence", 0.0) or 0.0) >= 0.6) or any(
             token in joined
             for token in (
                 "role boundaries",
@@ -492,8 +544,7 @@ def build_message_graph(enable_memory: bool = True):
     def _render_constraints_followup(
         profile: Dict[str, Any], missing_labels: List[str], unconfirmed_fields: List[Dict[str, Any]] | None = None
     ) -> str:
-        constraints = _as_text_list(profile.get("constraints"))
-        compensation_text = _extract_compensation_text(constraints)
+        compensation_text = _extract_compensation_text(profile)
         if not llm:
             missing_text = ", ".join(missing_labels)
             return (
@@ -534,8 +585,6 @@ def build_message_graph(enable_memory: bool = True):
         weeks = profile.get("timeline_weeks")
         week_text = str(int(weeks)) if isinstance(weeks, (int, float)) and weeks > 0 else "the target timeline"
         status = _constraint_component_status(profile)
-        constraints = _as_text_list(profile.get("constraints"))
-        compensation_text = _extract_compensation_text(constraints)
         unconfirmed_constraints = list(progress_state.get("unconfirmed_constraint_fields", []))
 
         candidates: List[Dict[str, Any]] = []
@@ -643,6 +692,38 @@ def build_message_graph(enable_memory: bool = True):
             f"[stopping_reason={stopping_reason}]"
         )
 
+    def _soft_freeze_profile(profile: Dict[str, Any], progress_state: ProgressState) -> Dict[str, Any]:
+        frozen = json.loads(json.dumps(profile, ensure_ascii=False))
+        preferences = _ensure_preferences(frozen)
+        needs_confirmation = list(progress_state.get("needs_confirmation", []))
+        pending_fields = {str(item.get("field", "")) for item in needs_confirmation if isinstance(item, dict)}
+
+        locked: Dict[str, Dict[str, Any]] = {}
+        defaults = {
+            "compensation_floor": "market-aligned minimum in target city",
+            "work_mode": "hybrid",
+            "role_boundaries": "avoid purely administrative tasks",
+        }
+        for field in ("compensation_floor", "work_mode", "role_boundaries"):
+            item = preferences.get(field, {})
+            value = item.get("value")
+            confidence = float(item.get("confidence", 0.0) or 0.0)
+            if value is not None and confidence >= 0.6:
+                locked[field] = {
+                    "value": value,
+                    "status": "confirmed",
+                    "confidence": round(confidence, 3),
+                }
+            else:
+                locked[field] = {
+                    "value": defaults.get(field),
+                    "status": "assumed_conservative",
+                    "confidence": round(confidence, 3),
+                    "reason": "important_unconfirmed" if field in pending_fields or _is_path_critical_field(field) else "unconfirmed",
+                }
+        frozen["locked_constraints"] = locked
+        return frozen
+
     def _default_followup_batch(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
         weeks = profile.get("timeline_weeks")
         week_text = str(int(weeks)) if isinstance(weeks, (int, float)) and weeks > 0 else "the target timeline"
@@ -672,19 +753,13 @@ def build_message_graph(enable_memory: bool = True):
                     "question": "Could you share your key non-negotiables for this transition? Compensation floor, preferred work mode, and role boundaries are all helpful.",
                 }
             )
-            missing_labels: List[str] = []
-            if not status["work_mode"]:
-                missing_labels.append("work mode")
-            if not status["role_boundaries"]:
-                missing_labels.append("role boundaries")
-            if missing_labels:
-                items.append(
-                    {
-                        "slot": "constraints",
-                        "signature": "constraints:missing",
-                        "question": _render_constraints_followup(profile, missing_labels, []),
-                    }
-                )
+            items.append(
+                {
+                    "slot": "constraints",
+                    "signature": "constraints:precision",
+                    "question": "To match roles precisely, what minimum monthly salary (RMB) and preferred work mode (on-site, hybrid, or remote) should I use?",
+                }
+            )
         if _is_empty(profile.get("industry")):
             items.append(
                 {
@@ -694,6 +769,64 @@ def build_message_graph(enable_memory: bool = True):
                 }
             )
         return items[:FOLLOWUP_QUESTION_LIMIT]
+
+    def _question_violates_hours_semantics(question: str) -> bool:
+        lowered = (question or "").lower()
+        # Guardrail: hours_per_week is learning/transition investment, not employment availability.
+        banned_phrases = (
+            "given your",
+            "availability",
+            "work hours",
+            "hours/week availability",
+            "15-hour/week",
+            "hours per week availability",
+            "flexibility in work hours",
+            "role type given your",
+        )
+        if "hours" not in lowered:
+            return False
+        return any(phrase in lowered for phrase in banned_phrases)
+
+    def _is_slot_question_valid(slot: str, question: str) -> bool:
+        lowered = (question or "").lower()
+        if not lowered.strip():
+            return False
+        if slot == "constraints" and _question_violates_hours_semantics(lowered):
+            return False
+        return True
+
+    def _enqueue_needs_confirmation(
+        queue: List[Dict[str, Any]],
+        asked_fields: List[str],
+        field: str,
+        hypothesis: Any,
+        confidence: float,
+    ) -> List[Dict[str, Any]]:
+        if field in asked_fields:
+            return queue
+        exists = any(str(item.get("field", "")) == field for item in queue)
+        if exists:
+            return queue
+        queue.append({"field": field, "hypothesis": hypothesis, "confidence": round(confidence, 3)})
+        return queue
+
+    def _build_confirmation_question_from_need(need: Dict[str, Any], profile: Dict[str, Any]) -> str:
+        field = str(need.get("field", "")).strip()
+        hypothesis = need.get("hypothesis")
+        if field == "work_mode":
+            if hypothesis:
+                return (
+                    f"I currently infer your preferred work mode is '{hypothesis}'. "
+                    "Should I lock this as your preference, or is another mode better?"
+                )
+            return "To avoid wrong matching, which work mode should I lock: on-site, hybrid, remote, or flexible?"
+        if field == "compensation_floor":
+            return "What minimum monthly salary (RMB) should I lock as your compensation floor?"
+        if field == "role_boundaries":
+            return (
+                "To keep role matching precise, what work content should I explicitly avoid when filtering roles?"
+            )
+        return "Could you quickly confirm this preference so I can finalize your constraints accurately?"
 
     def _prefetch_followup_batch(profile: Dict[str, Any], progress_state: ProgressState) -> List[Dict[str, Any]]:
         fallback = _default_followup_batch(profile)
@@ -708,6 +841,8 @@ def build_message_graph(enable_memory: bool = True):
             '{"questions":[{"slot":"target_role|goals|constraints|industry","question":"...","signature":"..."}]}. '
             "Max 6 questions. Use slot order: target_role -> goals -> constraints -> industry. "
             "Ask at most one question per slot, except constraints can have up to two. "
+            "Do not treat hours_per_week as job availability. It means learning/transition investment time only. "
+            "Never ask questions like flexibility in work hours based on hours_per_week. "
             "Do not include formatting constraints like 'answer in two lines'."
         )
         human_text = (
@@ -742,7 +877,7 @@ def build_message_graph(enable_memory: bool = True):
             limit = 2 if slot == "constraints" else 1
             if int(slot_counts.get(slot, 0)) >= limit:
                 continue
-            if not question:
+            if not _is_slot_question_valid(slot, question):
                 continue
             normalized.append({"slot": slot, "question": question, "signature": signature})
             slot_counts[slot] = int(slot_counts.get(slot, 0)) + 1
@@ -752,7 +887,31 @@ def build_message_graph(enable_memory: bool = True):
             return fallback
         order = {"target_role": 0, "goals": 1, "constraints": 2, "industry": 3}
         normalized.sort(key=lambda item: order.get(str(item.get("slot", "")), 99))
-        return normalized[:FOLLOWUP_QUESTION_LIMIT]
+        # Backfill from deterministic fallback to keep slot coverage stable.
+        merged = list(normalized)
+        merged_slot_counts: Dict[str, int] = {}
+        for item in merged:
+            slot = str(item.get("slot", ""))
+            merged_slot_counts[slot] = int(merged_slot_counts.get(slot, 0)) + 1
+        for item in fallback:
+            slot = str(item.get("slot", ""))
+            limit = 2 if slot == "constraints" else 1
+            if int(merged_slot_counts.get(slot, 0)) >= limit:
+                continue
+            if not _is_slot_question_valid(slot, str(item.get("question", ""))):
+                continue
+            merged.append(item)
+            merged_slot_counts[slot] = int(merged_slot_counts.get(slot, 0)) + 1
+            if len(merged) >= FOLLOWUP_QUESTION_LIMIT:
+                break
+
+        # Keep constraints follow-ups deterministic to avoid vague variants.
+        fallback_constraints = [item for item in fallback if str(item.get("slot", "")) == "constraints"][:2]
+        if fallback_constraints:
+            merged = [item for item in merged if str(item.get("slot", "")) != "constraints"] + fallback_constraints
+
+        merged.sort(key=lambda item: order.get(str(item.get("slot", "")), 99))
+        return merged[:FOLLOWUP_QUESTION_LIMIT]
 
     def _compute_followup_decision(profile: Dict[str, Any], progress_state: ProgressState) -> Dict[str, Any]:
         asked_count = int(progress_state.get("non_basic_questions_asked", 0) or 0)
@@ -827,10 +986,10 @@ def build_message_graph(enable_memory: bool = True):
 
         if slot == "constraints":
             signals = _extract_constraints_llm(raw)
-            committed, unconfirmed, max_conf = _build_constraints_from_signals(signals)
+            committed_preferences, unconfirmed, max_conf = _build_constraints_from_signals(signals)
             return {
                 "slot": slot,
-                "value": committed if committed else None,
+                "value": {"preferences": committed_preferences} if committed_preferences else None,
                 "confidence": max_conf,
                 "source": "llm",
                 "signals": signals,
@@ -1070,6 +1229,10 @@ def build_message_graph(enable_memory: bool = True):
         slot_extract = state.get("slot_extract") or {}
         committed = False
         unconfirmed_constraint_fields = list(progress_state.get("unconfirmed_constraint_fields", []))
+        needs_confirmation = list(progress_state.get("needs_confirmation", []))
+        asked_confirmation_fields = list(progress_state.get("asked_confirmation_fields", []))
+        active_confirmation_field = str(progress_state.get("active_confirmation_field", "") or "")
+        was_confirmation_turn = bool(active_confirmation_field)
         prefetched_followup_questions = list(progress_state.get("prefetched_followup_questions", []))
         prefetched_followup_index = int(progress_state.get("prefetched_followup_index", 0) or 0)
 
@@ -1112,10 +1275,53 @@ def build_message_graph(enable_memory: bool = True):
             if not slot:
                 pass
             elif slot == "constraints":
-                committed_constraints = _as_text_list(value)
-                if committed_constraints:
-                    memory = merge_profile(memory, {"constraints": committed_constraints})
+                committed_preferences = {}
+                if isinstance(value, dict):
+                    committed_preferences = value.get("preferences", {}) if isinstance(value.get("preferences", {}), dict) else {}
+                if committed_preferences:
+                    preferences = _ensure_preferences(memory)
+                    for field_name, payload in committed_preferences.items():
+                        if field_name not in preferences or not isinstance(payload, dict):
+                            continue
+                        field_value = payload.get("value")
+                        field_conf = payload.get("confidence", 0.0)
+                        if not isinstance(field_conf, (int, float)):
+                            field_conf = 0.0
+                        preferences[field_name] = {
+                            "value": field_value,
+                            "confidence": max(0.0, min(1.0, float(field_conf))),
+                        }
+                    memory["preferences"] = preferences
                     committed = True
+
+                signals = slot_extract.get("signals", {})
+                if isinstance(signals, dict):
+                    for field_name in ("compensation_floor", "work_mode", "role_boundaries"):
+                        field_payload = signals.get(field_name, {})
+                        if not isinstance(field_payload, dict):
+                            continue
+                        field_value = field_payload.get("value")
+                        field_conf = float(field_payload.get("confidence", 0.0) or 0.0)
+                        committed_high = field_value is not None and field_conf >= CONSTRAINT_COMMIT_THRESHOLD
+                        should_confirm = (not committed_high) and (
+                            field_conf < 0.6 or _is_path_critical_field(field_name)
+                        )
+                        if should_confirm:
+                            needs_confirmation = _enqueue_needs_confirmation(
+                                needs_confirmation,
+                                asked_confirmation_fields,
+                                field_name,
+                                field_value,
+                                field_conf,
+                            )
+
+                if active_confirmation_field:
+                    needs_confirmation = [
+                        item for item in needs_confirmation if str(item.get("field", "")) != active_confirmation_field
+                    ]
+                    if active_confirmation_field not in asked_confirmation_fields:
+                        asked_confirmation_fields.append(active_confirmation_field)
+                    active_confirmation_field = ""
                 current_slot = ""
                 current_slot_retries = 0
             elif status == "high" and not _is_empty(value):
@@ -1165,6 +1371,19 @@ def build_message_graph(enable_memory: bool = True):
         followup_last_ig = float(progress_state.get("followup_last_ig", 0.0) or 0.0)
         if committed:
             followup_candidate = {}
+        if required_slots_closed and (needs_confirmation or prefetched_followup_index < len(prefetched_followup_questions)):
+            followup_should_stop = False
+            followup_stop_reason = ""
+
+        # Rule: if field was already asked for confirmation and is now confirmed, never ask it again.
+        needs_confirmation = [
+            item
+            for item in needs_confirmation
+            if not (
+                str(item.get("field", "")) in asked_confirmation_fields
+                and _is_confirmed_preference(memory, str(item.get("field", "")))
+            )
+        ]
 
         if required_slots_closed and not awaiting_confirmation:
             question_stage = "targeted"
@@ -1177,7 +1396,7 @@ def build_message_graph(enable_memory: bool = True):
             question_stage = "collecting"
 
         if was_targeted and not awaiting_confirmation and required_slots_closed and prefetched_followup_questions:
-            if prefetched_followup_index < len(prefetched_followup_questions):
+            if (not was_confirmation_turn) and prefetched_followup_index < len(prefetched_followup_questions):
                 prefetched_followup_index += 1
 
         next_turn_index = int(user_state.get("turn_index", 0) or 0)
@@ -1212,6 +1431,9 @@ def build_message_graph(enable_memory: bool = True):
             "followup_stop_reason": followup_stop_reason,
             "followup_last_ig": followup_last_ig,
             "unconfirmed_constraint_fields": unconfirmed_constraint_fields,
+            "needs_confirmation": needs_confirmation,
+            "asked_confirmation_fields": asked_confirmation_fields,
+            "active_confirmation_field": active_confirmation_field,
             "prefetched_followup_questions": prefetched_followup_questions,
             "prefetched_followup_index": prefetched_followup_index,
             "plan_ready": required_slots_closed and bool(progress_state.get("question_phase_complete", False)),
@@ -1267,15 +1489,19 @@ def build_message_graph(enable_memory: bool = True):
         required_slots_closed = bool(progress_state.get("required_slots_closed", False)) or not pending_slots
         prefetched_followup_questions = list(progress_state.get("prefetched_followup_questions", []))
         prefetched_followup_index = int(progress_state.get("prefetched_followup_index", 0) or 0)
+        needs_confirmation = list(progress_state.get("needs_confirmation", []))
 
         if bool(progress_state.get("question_phase_complete", False)):
             return "plan"
         if bool(progress_state.get("awaiting_confirmation", False)):
             return "ask"
         if bool(progress_state.get("followup_should_stop", False)):
-            return "question_exit"
+            if required_slots_closed and (not needs_confirmation) and prefetched_followup_index >= len(prefetched_followup_questions):
+                return "question_exit"
         if not pending_slots:
             if required_slots_closed:
+                if needs_confirmation:
+                    return "ask"
                 if not prefetched_followup_questions and prefetched_followup_index == 0:
                     return "ask"
                 if prefetched_followup_index >= len(prefetched_followup_questions):
@@ -1312,6 +1538,9 @@ def build_message_graph(enable_memory: bool = True):
         followup_should_stop = bool(progress_state.get("followup_should_stop", False))
         followup_stop_reason = str(progress_state.get("followup_stop_reason", "") or "")
         followup_last_ig = float(progress_state.get("followup_last_ig", 0.0) or 0.0)
+        needs_confirmation = list(progress_state.get("needs_confirmation", []))
+        asked_confirmation_fields = list(progress_state.get("asked_confirmation_fields", []))
+        active_confirmation_field = str(progress_state.get("active_confirmation_field", "") or "")
         prefetched_followup_questions = list(progress_state.get("prefetched_followup_questions", []))
         prefetched_followup_index = int(progress_state.get("prefetched_followup_index", 0) or 0)
 
@@ -1324,22 +1553,51 @@ def build_message_graph(enable_memory: bool = True):
             if current_slot and pending_slots:
                 question = _build_slot_question(current_slot, int(attempts.get(current_slot, 0)))
             elif required_slots_closed:
-                if not prefetched_followup_questions:
-                    prefetched_followup_questions = _prefetch_followup_batch(profile, progress_state)
-                    prefetched_followup_index = 0
-                if prefetched_followup_index < len(prefetched_followup_questions):
-                    item = prefetched_followup_questions[prefetched_followup_index]
-                    question = str(item.get("question", "") or "")
-                    current_slot = str(item.get("slot", "") or "")
-                    signature = str(item.get("signature", "") or "")
-                    if signature and signature not in followup_signatures_asked:
-                        followup_signatures_asked.append(signature)
+                while needs_confirmation:
+                    head_field = str(needs_confirmation[0].get("field", ""))
+                    if head_field in asked_confirmation_fields and _is_confirmed_preference(profile, head_field):
+                        needs_confirmation = needs_confirmation[1:]
+                        continue
+                    break
+                if needs_confirmation:
+                    need = needs_confirmation[0]
+                    question = _build_confirmation_question_from_need(need, profile)
+                    current_slot = "constraints"
+                    active_confirmation_field = str(need.get("field", "")).strip()
                     non_basic_questions_asked += 1
-                    followup_budget_remaining = max(0.0, followup_budget_remaining - FOLLOWUP_COST_PER_QUESTION)
-                    followup_candidate = item
+                    followup_candidate = need
                     followup_last_ig = 1.0
                     followup_stop_reason = ""
                     followup_should_stop = False
+                elif not prefetched_followup_questions:
+                    prefetched_followup_questions = _prefetch_followup_batch(profile, progress_state)
+                    prefetched_followup_index = 0
+                if not needs_confirmation:
+                    while prefetched_followup_index < len(prefetched_followup_questions):
+                        item = prefetched_followup_questions[prefetched_followup_index]
+                        signature = str(item.get("signature", "") or "")
+                        status = _constraint_component_status(profile)
+                        stale_precision = (
+                            signature == "constraints:precision"
+                            and status.get("compensation_floor")
+                            and status.get("work_mode")
+                        )
+                        if not stale_precision:
+                            break
+                        prefetched_followup_index += 1
+                    if prefetched_followup_index < len(prefetched_followup_questions):
+                        item = prefetched_followup_questions[prefetched_followup_index]
+                        question = str(item.get("question", "") or "")
+                        current_slot = str(item.get("slot", "") or "")
+                        signature = str(item.get("signature", "") or "")
+                        if signature and signature not in followup_signatures_asked:
+                            followup_signatures_asked.append(signature)
+                        non_basic_questions_asked += 1
+                        followup_budget_remaining = max(0.0, followup_budget_remaining - FOLLOWUP_COST_PER_QUESTION)
+                        followup_candidate = item
+                        followup_last_ig = 1.0
+                        followup_stop_reason = ""
+                        followup_should_stop = False
                 else:
                     followup_should_stop = True
                     followup_stop_reason = "optional_slots_sufficiently_covered"
@@ -1361,6 +1619,9 @@ def build_message_graph(enable_memory: bool = True):
             "followup_should_stop": followup_should_stop,
             "followup_stop_reason": followup_stop_reason,
             "followup_last_ig": followup_last_ig,
+            "needs_confirmation": needs_confirmation,
+            "asked_confirmation_fields": asked_confirmation_fields,
+            "active_confirmation_field": active_confirmation_field,
             "prefetched_followup_questions": prefetched_followup_questions,
             "prefetched_followup_index": prefetched_followup_index,
             "last_node": "ask",
@@ -1403,6 +1664,7 @@ def build_message_graph(enable_memory: bool = True):
         progress_state = _get_progress_state(state)
         last_user = _last_user_content(messages)
         memory = user_state.get("profile") or default_profile()
+        frozen_memory = _soft_freeze_profile(memory, progress_state)
         goal_constraints = user_state.get("goal_constraints") or default_goal_constraints()
         strategy_tags = user_state.get("strategy_tags") or []
         rag_context = state.get("rag_context", "")
@@ -1415,18 +1677,24 @@ def build_message_graph(enable_memory: bool = True):
             )
             rag_context = str(rag_payload.get("rag_context", "") or "")
 
-        prompt = _plan_prompt(memory, goal_constraints, strategy_tags, last_user, rag_context)
+        prompt = _plan_prompt(frozen_memory, goal_constraints, strategy_tags, last_user, rag_context)
         text = _invoke_llm(prompt)
         if not text:
             text = "Sorry, the model is currently unavailable and cannot generate a final plan."
 
         stopping_reason = str(progress_state.get("followup_stop_reason", "") or "optional_slots_sufficiently_covered")
-        preface = _build_closing_confirmation(memory, stopping_reason)
+        preface = _build_closing_confirmation(frozen_memory, stopping_reason)
         text = f"{preface}\n\n\n{text}"
 
         _append_assistant(messages, text)
         next_progress_state: ProgressState = {**progress_state, "plan_ready": True, "last_node": "plan"}
-        return {"messages": messages, "last_answer": text, "progress_state": next_progress_state, "conversation_complete": True}
+        return {
+            "messages": messages,
+            "last_answer": text,
+            "progress_state": next_progress_state,
+            "conversation_complete": True,
+            "memory": frozen_memory,
+        }
 
     def memory_maintain_node(state: ChatConversationState) -> ChatConversationState:
         messages = normalize_messages(state.get("messages", []))

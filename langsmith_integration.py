@@ -91,6 +91,14 @@ class LangSmithLogger:
                 print(f"[LangSmith] Client init failed: {e}")
                 self.enabled = False
 
+    def _safe_uuid_str(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        try:
+            return str(uuid.UUID(str(value)))
+        except Exception:
+            return None
+
     def start_run(self, name: str) -> str:
         self.run_id = str(uuid.uuid4())
         if self.enabled:
@@ -101,7 +109,9 @@ class LangSmithLogger:
                     inputs={},
                     run_type="chain",
                 )
-                self.run_id = str(getattr(run, "id", self.run_id))
+                remote_id = self._safe_uuid_str(getattr(run, "id", None))
+                if remote_id:
+                    self.run_id = remote_id
             except Exception as e:
                 print(f"[LangSmith] start_run failed: {e}")
                 self.enabled = False
@@ -112,12 +122,13 @@ class LangSmithLogger:
     def log_event(self, body: str, metadata: dict | None = None) -> None:
         metadata = metadata or {}
         ts = time.time()
-        if self.enabled:
+        run_uuid = self._safe_uuid_str(self.run_id)
+        if self.enabled and run_uuid:
             try:
                 if hasattr(self.client, "log_event"):
-                    self.client.log_event(self.run_id, body=body, metadata=metadata, timestamp=ts)
+                    self.client.log_event(run_uuid, body=body, metadata=metadata, timestamp=ts)
                 elif hasattr(self.client, "create_event"):
-                    self.client.create_event(run_id=self.run_id, body=body, metadata=metadata)
+                    self.client.create_event(run_id=run_uuid, body=body, metadata=metadata)
             except Exception:
                 # Degrade to stdout but keep the run alive.
                 self.enabled = False
@@ -126,13 +137,14 @@ class LangSmithLogger:
             print(f"[LangSmith-LOG] {body} | {metadata}")
 
     def end_run(self, status: str = "completed") -> None:
-        if self.enabled:
+        run_uuid = self._safe_uuid_str(self.run_id)
+        if self.enabled and run_uuid:
             try:
                 end_time = datetime.now(timezone.utc)
                 if hasattr(self.client, "update_run"):
-                    self.client.update_run(run_id=self.run_id, outputs={}, end_time=end_time)
+                    self.client.update_run(run_id=run_uuid, outputs={}, end_time=end_time)
                 elif hasattr(self.client, "finish_run"):
-                    self.client.finish_run(self.run_id, status=status)
+                    self.client.finish_run(run_uuid, status=status)
             except Exception as e:
                 print(f"[LangSmith] end_run failed: {e}")
                 self.enabled = False
