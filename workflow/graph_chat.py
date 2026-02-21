@@ -79,7 +79,7 @@ CONSTRAINT_COMMIT_THRESHOLD = 0.75
 
 
 def build_message_graph(enable_memory: bool = True):
-    langsmith_status = configure_langsmith("message-flow")
+    runtime_status = configure_langsmith("message-flow")
     llm = get_chat_model()
 
     def _default_user_state() -> UserState:
@@ -186,24 +186,69 @@ def build_message_graph(enable_memory: bool = True):
         else:
             messages.append({"role": "assistant", "content": content})
 
+    def _extract_text_from_response(response: Any) -> str:
+        content = getattr(response, "content", None)
+        if isinstance(content, str):
+            text = content.strip()
+            if text:
+                return text
+        elif isinstance(content, list):
+            chunks: List[str] = []
+            for item in content:
+                if isinstance(item, str) and item.strip():
+                    chunks.append(item.strip())
+                elif isinstance(item, dict):
+                    text = str(item.get("text", "")).strip()
+                    if text:
+                        chunks.append(text)
+            merged = "\n".join(chunks).strip()
+            if merged:
+                return merged
+
+        additional_kwargs = getattr(response, "additional_kwargs", {}) or {}
+        if isinstance(additional_kwargs, dict):
+            for key in ("reasoning_content", "reasoning", "output_text"):
+                value = additional_kwargs.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+        fallback = str(response).strip()
+        return fallback
+
     def _invoke_llm(messages: List[Any]) -> str:
         if not llm:
             return ""
-        try:
-            if HAS_LANGCHAIN_MESSAGES:
-                response = llm.invoke(messages)
-            else:
-                prompt = "\n".join(
-                    f"{item.get('role', 'user')}: {item.get('content', '')}" for item in serialize_messages_openai(messages)
-                )
-                response = llm.invoke(prompt)
-            return getattr(response, "content", None) or str(response)
-        except Exception as exc:
+
+        last_error = ""
+        for attempt in (1, 2):
             try:
-                logger.log_event("llm_chat_error", {"error": str(exc)})
+                if HAS_LANGCHAIN_MESSAGES:
+                    response = llm.invoke(messages)
+                else:
+                    prompt = "\n".join(
+                        f"{item.get('role', 'user')}: {item.get('content', '')}" for item in serialize_messages_openai(messages)
+                    )
+                    response = llm.invoke(prompt)
+                text = _extract_text_from_response(response)
+                if text:
+                    return text
+                try:
+                    logger.log_event("llm_empty_response", {"attempt": attempt})
+                except Exception:
+                    pass
+            except Exception as exc:
+                last_error = str(exc)
+                try:
+                    logger.log_event("llm_chat_error", {"attempt": attempt, "error": last_error})
+                except Exception:
+                    pass
+
+        if last_error:
+            try:
+                logger.log_event("llm_chat_final_failure", {"error": last_error})
             except Exception:
                 pass
-            return ""
+        return ""
 
     def _missing_fields(profile: Dict[str, Any], required_slots: List[str]) -> List[str]:
         return [field for field in required_slots if _is_empty(profile.get(field))]
@@ -1133,24 +1178,119 @@ def build_message_graph(enable_memory: bool = True):
         goal_constraints_json = json.dumps(goal_constraints, ensure_ascii=False)
         strategy_tag_text = ", ".join(strategy_tags) if strategy_tags else "none"
 
-        system_text = "You are a career planning expert. Produce one final, concrete, actionable plan. Do not ask follow-up questions in this step."
+        system_text = (
+            "You are a career planning expert. "
+            "Generate a final actionable plan and output STRICT JSON only (no markdown, no code fence)."
+        )
         human_text = (
             f"Latest user message:\n{last_user}\n\n"
             f"User profile (JSON):\n{memory_json}\n\n"
             f"Goal and constraints (JSON):\n{goal_constraints_json}\n\n"
             f"Strategy tags:\n{strategy_tag_text}\n\n"
             f"RAG context:\n{rag_context or 'none'}\n\n"
-            "Output sections:\n"
-            "1) Recommended target direction (1-2 options)\n"
-            "2) Key capability gaps\n"
-            "3) 8-week action plan\n"
-            "4) Resources/projects with rationale\n"
-            "5) Validation checklist (measurable)\n"
-            "6) Risks and assumptions\n"
+            "Return JSON schema:\n"
+            "{\n"
+            '  "summary": "short summary",\n'
+            '  "target_direction": ["option1", "option2"],\n'
+            '  "capability_gaps": ["gap1", "gap2"],\n'
+            '  "phases": [\n'
+            "    {\n"
+            '      "timeline": "Week 1-2",\n'
+            '      "title": "phase title",\n'
+            '      "description": "phase objective",\n'
+            '      "status": "pending|in-progress|completed",\n'
+            '      "action_items": ["item1", "item2"],\n'
+            '      "deliverables": ["deliverable1"],\n'
+            '      "success_criteria": "measurable criterion",\n'
+            '      "risks": "main risk"\n'
+            "    }\n"
+            "  ],\n"
+            '  "validation_checklist": ["check1", "check2"],\n'
+            '  "assumptions": ["assumption1"]\n'
+            "}\n"
+            "Rules: phases must be 3-6 items; action_items each phase >= 2; keep concise and concrete."
         )
         if HAS_LANGCHAIN_MESSAGES and SystemMessage and HumanMessage:
             return [SystemMessage(content=system_text), HumanMessage(content=human_text)]
         return [{"role": "system", "content": system_text}, {"role": "user", "content": human_text}]
+
+    def _coerce_text_list(value: Any) -> List[str]:
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        return []
+
+    def _parse_structured_plan(raw: str) -> Dict[str, Any]:
+        parsed = try_parse_json(raw)
+        if not isinstance(parsed, dict):
+            return {}
+
+        phases_raw = parsed.get("phases")
+        phases: List[Dict[str, Any]] = []
+        if isinstance(phases_raw, list):
+            for item in phases_raw:
+                if not isinstance(item, dict):
+                    continue
+                phase = {
+                    "timeline": str(item.get("timeline", "")).strip(),
+                    "title": str(item.get("title", "")).strip(),
+                    "description": str(item.get("description", "")).strip(),
+                    "status": str(item.get("status", "pending")).strip() or "pending",
+                    "action_items": _coerce_text_list(item.get("action_items")),
+                    "deliverables": _coerce_text_list(item.get("deliverables")),
+                    "success_criteria": str(item.get("success_criteria", "")).strip(),
+                    "risks": str(item.get("risks", "")).strip(),
+                }
+                if phase["title"] and phase["description"]:
+                    phases.append(phase)
+
+        result = {
+            "summary": str(parsed.get("summary", "")).strip(),
+            "target_direction": _coerce_text_list(parsed.get("target_direction")),
+            "capability_gaps": _coerce_text_list(parsed.get("capability_gaps")),
+            "phases": phases,
+            "validation_checklist": _coerce_text_list(parsed.get("validation_checklist")),
+            "assumptions": _coerce_text_list(parsed.get("assumptions")),
+            "raw_text": raw.strip(),
+        }
+        if not phases:
+            return {}
+        return result
+
+    def _render_plan_text(plan: Dict[str, Any], fallback_text: str) -> str:
+        phases = plan.get("phases", [])
+        if not isinstance(phases, list) or not phases:
+            return fallback_text
+
+        lines: List[str] = []
+        summary = str(plan.get("summary", "")).strip()
+        if summary:
+            lines.append(summary)
+            lines.append("")
+
+        for index, phase in enumerate(phases, start=1):
+            if not isinstance(phase, dict):
+                continue
+            timeline = str(phase.get("timeline", "")).strip()
+            title = str(phase.get("title", "")).strip() or f"Phase {index}"
+            description = str(phase.get("description", "")).strip()
+            lines.append(f"{index}. {title} ({timeline or 'TBD'})")
+            if description:
+                lines.append(f"   - Objective: {description}")
+            action_items = phase.get("action_items", [])
+            if isinstance(action_items, list):
+                for item in action_items[:5]:
+                    text = str(item).strip()
+                    if text:
+                        lines.append(f"   - Action: {text}")
+            success_criteria = str(phase.get("success_criteria", "")).strip()
+            if success_criteria:
+                lines.append(f"   - Done when: {success_criteria}")
+            lines.append("")
+
+        final = "\n".join(lines).strip()
+        return final or fallback_text
 
     def routing_node(state: ChatConversationState) -> ChatConversationState:
         messages = normalize_messages(state.get("messages", []))
@@ -1680,7 +1820,14 @@ def build_message_graph(enable_memory: bool = True):
         prompt = _plan_prompt(frozen_memory, goal_constraints, strategy_tags, last_user, rag_context)
         text = _invoke_llm(prompt)
         if not text:
-            text = "Sorry, the model is currently unavailable and cannot generate a final plan."
+            text = (
+                "The planning model did not return usable content this turn. "
+                "Please send: 'retry final plan' and I will regenerate it immediately."
+            )
+            final_plan = {}
+        else:
+            final_plan = _parse_structured_plan(text)
+            text = _render_plan_text(final_plan, text)
 
         stopping_reason = str(progress_state.get("followup_stop_reason", "") or "optional_slots_sufficiently_covered")
         preface = _build_closing_confirmation(frozen_memory, stopping_reason)
@@ -1694,6 +1841,7 @@ def build_message_graph(enable_memory: bool = True):
             "progress_state": next_progress_state,
             "conversation_complete": True,
             "memory": frozen_memory,
+            "final_plan": final_plan,
         }
 
     def memory_maintain_node(state: ChatConversationState) -> ChatConversationState:
@@ -1783,7 +1931,7 @@ def build_message_graph(enable_memory: bool = True):
 
     try:
         logger.start_run("message_flow")
-        logger.log_event("langsmith_config", langsmith_status)
+        logger.log_event("runtime_logger_config", runtime_status)
         logger.log_event("llm_config", {"enabled": bool(llm), "model": os.getenv("OPENAI_MODEL")})
         logger.log_event("mcp_config", {"servers": list(get_mcp_servers().keys())})
     except Exception:

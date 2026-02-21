@@ -92,6 +92,7 @@ class ChatConversationState(TypedDict, total=False):
     route_reasons: List[str]
     rag_context: str
     evaluation: Dict[str, Any]
+    final_plan: Dict[str, Any]
     llm_enabled: bool
     enable_memory_maintain: bool
     max_messages: int

@@ -1,0 +1,8 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+data/rag_chroma
+career-UI/node_modules
+career-UI/dist

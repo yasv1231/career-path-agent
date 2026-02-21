@@ -1,0 +1,29 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: career-path-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - FRONTEND_ORIGIN=${FRONTEND_ORIGIN:-http://localhost:3000}
+      - APP_DB_PATH=/app/data/app.db
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL}
+      - OPENAI_TEMPERATURE=${OPENAI_TEMPERATURE}
+    volumes:
+      - ./data:/app/data
+
+  frontend:
+    build:
+      context: ./career-UI
+      dockerfile: Dockerfile
+    container_name: career-path-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_BACKEND_PROXY_TARGET=http://backend:8000
+    depends_on:
+      - backend

@@ -6,3 +6,5 @@ __pycache__/
 .env
 data/rag_chroma/
 data/reference_rag_db/
+
+data/app.db
