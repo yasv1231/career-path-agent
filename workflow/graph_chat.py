@@ -81,6 +81,33 @@ CONSTRAINT_COMMIT_THRESHOLD = 0.75
 def build_message_graph(enable_memory: bool = True):
     runtime_status = configure_langsmith("message-flow")
     llm = get_chat_model()
+    fast_model_name = os.getenv("OPENAI_FAST_MODEL", "").strip()
+    fast_llm = (
+        get_chat_model(
+            model=fast_model_name,
+            model_env="OPENAI_FAST_MODEL",
+            temperature_env="OPENAI_FAST_TEMPERATURE",
+        )
+        if fast_model_name
+        else llm
+    )
+    try:
+        memory_summary_interval = max(1, int(os.getenv("MEMORY_SUMMARY_INTERVAL", "3")))
+    except Exception:
+        memory_summary_interval = 3
+    try:
+        memory_summary_min_turns = max(0, int(os.getenv("MEMORY_SUMMARY_MIN_TURNS", "6")))
+    except Exception:
+        memory_summary_min_turns = 6
+    try:
+        memory_summary_trigger_overflow = max(1, int(os.getenv("MEMORY_SUMMARY_TRIGGER_OVERFLOW", "8")))
+    except Exception:
+        memory_summary_trigger_overflow = 8
+
+    def _resolve_llm(prefer_fast: bool = False):
+        if prefer_fast and fast_llm:
+            return fast_llm
+        return llm
 
     def _default_user_state() -> UserState:
         return {
@@ -215,20 +242,21 @@ def build_message_graph(enable_memory: bool = True):
         fallback = str(response).strip()
         return fallback
 
-    def _invoke_llm(messages: List[Any]) -> str:
-        if not llm:
+    def _invoke_llm(messages: List[Any], prefer_fast: bool = False) -> str:
+        model_client = _resolve_llm(prefer_fast=prefer_fast)
+        if not model_client:
             return ""
 
         last_error = ""
         for attempt in (1, 2):
             try:
                 if HAS_LANGCHAIN_MESSAGES:
-                    response = llm.invoke(messages)
+                    response = model_client.invoke(messages)
                 else:
                     prompt = "\n".join(
                         f"{item.get('role', 'user')}: {item.get('content', '')}" for item in serialize_messages_openai(messages)
                     )
-                    response = llm.invoke(prompt)
+                    response = model_client.invoke(prompt)
                 text = _extract_text_from_response(response)
                 if text:
                     return text
@@ -374,7 +402,8 @@ def build_message_graph(enable_memory: bool = True):
 
     def _extract_constraints_llm(text: str) -> Dict[str, Dict[str, Any]]:
         fallback = _extract_constraints_rule(text)
-        if not llm:
+        model_client = _resolve_llm(prefer_fast=True)
+        if not model_client:
             return fallback
 
         system_text = (
@@ -387,9 +416,9 @@ def build_message_graph(enable_memory: bool = True):
         human_text = f"User message:\n{text}"
         try:
             if HAS_LANGCHAIN_MESSAGES and SystemMessage and HumanMessage:
-                response = llm.invoke([SystemMessage(content=system_text), HumanMessage(content=human_text)])
+                response = model_client.invoke([SystemMessage(content=system_text), HumanMessage(content=human_text)])
             else:
-                response = llm.invoke(system_text + "\n\n" + human_text)
+                response = model_client.invoke(system_text + "\n\n" + human_text)
             parsed = try_parse_json(getattr(response, "content", None) or str(response))
         except Exception:
             parsed = None
@@ -590,7 +619,8 @@ def build_message_graph(enable_memory: bool = True):
         profile: Dict[str, Any], missing_labels: List[str], unconfirmed_fields: List[Dict[str, Any]] | None = None
     ) -> str:
         compensation_text = _extract_compensation_text(profile)
-        if not llm:
+        model_client = _resolve_llm(prefer_fast=True)
+        if not model_client:
             missing_text = ", ".join(missing_labels)
             return (
                 f"I understand {compensation_text.lower()}. "
@@ -609,9 +639,9 @@ def build_message_graph(enable_memory: bool = True):
         )
         try:
             if HAS_LANGCHAIN_MESSAGES and SystemMessage and HumanMessage:
-                response = llm.invoke([SystemMessage(content=system_text), HumanMessage(content=human_text)])
+                response = model_client.invoke([SystemMessage(content=system_text), HumanMessage(content=human_text)])
             else:
-                response = llm.invoke(system_text + "\n\n" + human_text)
+                response = model_client.invoke(system_text + "\n\n" + human_text)
             text = re.sub(r"\s+", " ", str(getattr(response, "content", None) or response)).strip()
             if text:
                 return text
@@ -875,7 +905,8 @@ def build_message_graph(enable_memory: bool = True):
 
     def _prefetch_followup_batch(profile: Dict[str, Any], progress_state: ProgressState) -> List[Dict[str, Any]]:
         fallback = _default_followup_batch(profile)
-        if not llm:
+        model_client = _resolve_llm(prefer_fast=True)
+        if not model_client:
             return fallback
 
         weeks = profile.get("timeline_weeks")
@@ -899,9 +930,9 @@ def build_message_graph(enable_memory: bool = True):
 
         try:
             if HAS_LANGCHAIN_MESSAGES and SystemMessage and HumanMessage:
-                response = llm.invoke([SystemMessage(content=system_text), HumanMessage(content=human_text)])
+                response = model_client.invoke([SystemMessage(content=system_text), HumanMessage(content=human_text)])
             else:
-                response = llm.invoke(system_text + "\n\n" + human_text)
+                response = model_client.invoke(system_text + "\n\n" + human_text)
             parsed = try_parse_json(getattr(response, "content", None) or str(response))
         except Exception:
             parsed = None
@@ -1063,7 +1094,8 @@ def build_message_graph(enable_memory: bool = True):
         return {"slot": slot, "value": None, "confidence": 0.3, "source": "rule"}
 
     def _extract_llm_slot(slot: str, text: str) -> Dict[str, Any]:
-        if not llm:
+        model_client = _resolve_llm(prefer_fast=True)
+        if not model_client:
             return {"slot": slot, "value": None, "confidence": 0.0, "source": "none"}
 
         instruction = (
@@ -1080,9 +1112,9 @@ def build_message_graph(enable_memory: bool = True):
         )
         try:
             if HAS_LANGCHAIN_MESSAGES and SystemMessage and HumanMessage:
-                response = llm.invoke([SystemMessage(content=instruction), HumanMessage(content=prompt)])
+                response = model_client.invoke([SystemMessage(content=instruction), HumanMessage(content=prompt)])
             else:
-                response = llm.invoke(instruction + "\n\n" + prompt)
+                response = model_client.invoke(instruction + "\n\n" + prompt)
             raw = getattr(response, "content", None) or str(response)
             data = try_parse_json(raw)
         except Exception as exc:
@@ -1850,17 +1882,30 @@ def build_message_graph(enable_memory: bool = True):
         if len(messages) <= max_messages:
             return {"messages": messages}
 
+        user_state = _get_user_state(state)
+        turn_index = int(user_state.get("turn_index", 0) or 0)
+        overflow = len(messages) - max_messages
+        force_summary_overflow = max(16, memory_summary_trigger_overflow * 2)
+        should_summarize = (
+            overflow >= memory_summary_trigger_overflow
+            and turn_index >= memory_summary_min_turns
+            and turn_index % memory_summary_interval == 0
+        )
+        if overflow >= force_summary_overflow:
+            should_summarize = True
+
         summary_text = ""
-        if llm:
+        summary_llm = _resolve_llm(prefer_fast=True)
+        if summary_llm and should_summarize:
             summary_system = "Summarize the conversation briefly for memory. Output 3 bullets max."
             summary_human = "\n".join(
                 f"{msg.get('role', 'user')}: {msg.get('content', '')}" for msg in serialize_messages_openai(messages)
             )
             try:
                 if HAS_LANGCHAIN_MESSAGES and SystemMessage and HumanMessage:
-                    response = llm.invoke([SystemMessage(content=summary_system), HumanMessage(content=summary_human)])
+                    response = summary_llm.invoke([SystemMessage(content=summary_system), HumanMessage(content=summary_human)])
                 else:
-                    response = llm.invoke(summary_system + "\n\n" + summary_human)
+                    response = summary_llm.invoke(summary_system + "\n\n" + summary_human)
                 summary_text = getattr(response, "content", None) or str(response)
             except Exception:
                 summary_text = ""
@@ -1932,7 +1977,18 @@ def build_message_graph(enable_memory: bool = True):
     try:
         logger.start_run("message_flow")
         logger.log_event("runtime_logger_config", runtime_status)
-        logger.log_event("llm_config", {"enabled": bool(llm), "model": os.getenv("OPENAI_MODEL")})
+        logger.log_event(
+            "llm_config",
+            {
+                "enabled": bool(llm),
+                "model": os.getenv("OPENAI_MODEL"),
+                "fast_enabled": bool(fast_llm),
+                "fast_model": fast_model_name or os.getenv("OPENAI_MODEL"),
+                "memory_summary_interval": memory_summary_interval,
+                "memory_summary_min_turns": memory_summary_min_turns,
+                "memory_summary_trigger_overflow": memory_summary_trigger_overflow,
+            },
+        )
         logger.log_event("mcp_config", {"servers": list(get_mcp_servers().keys())})
     except Exception:
         pass

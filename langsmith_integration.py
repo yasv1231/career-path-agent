@@ -23,7 +23,12 @@ def configure_langsmith(project: str | None = None) -> dict[str, Any]:
     }
 
 
-def get_chat_model() -> Any | None:
+def get_chat_model(
+    model: str | None = None,
+    temperature: float | None = None,
+    model_env: str = "OPENAI_MODEL",
+    temperature_env: str = "OPENAI_TEMPERATURE",
+) -> Any | None:
     if not HAS_LANGCHAIN_OPENAI:
         print("[LLM] langchain_openai not available; skipping LLM node.")
         return None
@@ -33,18 +38,21 @@ def get_chat_model() -> Any | None:
         print("[LLM] OPENAI_API_KEY not set; skipping LLM node.")
         return None
 
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    resolved_model = (model or "").strip() or os.getenv(model_env, "gpt-4o-mini")
     base_url = os.getenv("OPENAI_BASE_URL")
 
-    temp_raw = os.getenv("OPENAI_TEMPERATURE", "0")
-    try:
-        temperature = float(temp_raw)
-    except ValueError:
-        temperature = 0.0
+    if temperature is None:
+        temp_raw = os.getenv(temperature_env, "0")
+        try:
+            resolved_temperature = float(temp_raw)
+        except ValueError:
+            resolved_temperature = 0.0
+    else:
+        resolved_temperature = float(temperature)
 
     kwargs: dict[str, Any] = {
-        "model": model,
-        "temperature": temperature,
+        "model": resolved_model,
+        "temperature": resolved_temperature,
         "api_key": api_key,
     }
     if base_url:
@@ -52,7 +60,7 @@ def get_chat_model() -> Any | None:
 
     try:
         chat = ChatOpenAI(**kwargs)
-        print(f"[LLM] Chat model ready: model={model} temperature={temperature}")
+        print(f"[LLM] Chat model ready: model={resolved_model} temperature={resolved_temperature}")
         return chat
     except Exception as e:
         print(f"[LLM] Failed to initialize chat model: {e}")

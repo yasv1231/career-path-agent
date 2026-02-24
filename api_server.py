@@ -126,6 +126,7 @@ class ProfileResponse(BaseModel):
     missing_fields: list[str] = Field(default_factory=list)
     collected_points: list[dict[str, str]] = Field(default_factory=list)
     planning_history: list[dict[str, Any]] = Field(default_factory=list)
+    planning_versions: list[dict[str, Any]] = Field(default_factory=list)
     updated_at: int | None = None
 
 
@@ -309,6 +310,7 @@ def _build_profile_response(user: dict[str, Any]) -> ProfileResponse:
     sessions = db.list_chat_sessions(str(user["id"]), limit=20)
 
     planning_history: list[dict[str, Any]] = []
+    planning_versions_raw: list[dict[str, Any]] = []
     for item in sessions:
         state = item.get("state", {})
         if not isinstance(state, dict):
@@ -335,6 +337,28 @@ def _build_profile_response(user: dict[str, Any]) -> ProfileResponse:
             }
         )
 
+        final_plan = state.get("final_plan")
+        if isinstance(final_plan, dict):
+            phases = final_plan.get("phases")
+            if isinstance(phases, list) and len(phases) > 0:
+                planning_versions_raw.append(
+                    {
+                        "session_id": str(item.get("id", "")),
+                        "target_role": str(profile.get("target_role", "")).strip(),
+                        "updated_at": int(item.get("updated_at", 0) or 0),
+                        "created_at": int(item.get("created_at", 0) or 0),
+                        "final_plan": final_plan,
+                        "summary": str(final_plan.get("summary", "")).strip(),
+                        "phases_count": len(phases),
+                    }
+                )
+
+    planning_versions_raw.sort(key=lambda row: int(row.get("updated_at", 0)))
+    for index, row in enumerate(planning_versions_raw, start=1):
+        row["version"] = index
+        row["version_label"] = f"v{index}"
+    planning_versions = list(reversed(planning_versions_raw))
+
     latest = db.get_latest_chat_session(str(user["id"]))
     if not latest:
         return ProfileResponse(
@@ -347,6 +371,7 @@ def _build_profile_response(user: dict[str, Any]) -> ProfileResponse:
             missing_fields=list(PROFILE_REQUIRED_FIELDS),
             collected_points=[],
             planning_history=planning_history,
+            planning_versions=planning_versions,
             updated_at=None,
         )
 
@@ -379,6 +404,7 @@ def _build_profile_response(user: dict[str, Any]) -> ProfileResponse:
         missing_fields=[str(item) for item in missing_fields if str(item).strip()],
         collected_points=_build_collected_points(state),
         planning_history=planning_history,
+        planning_versions=planning_versions,
         updated_at=int(latest.get("updated_at")) if latest.get("updated_at") else None,
     )
 
